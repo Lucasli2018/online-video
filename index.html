@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>咪咪剪辑 · online-video v1.2.0</title>
+<title>咪咪剪辑 · online-video v1.3.0</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <style>
 :root{
@@ -175,7 +175,9 @@ textarea{resize:vertical;width:100%;}
 .tl-head.h-video{background:var(--primary-soft);color:var(--primary-deep);}
 .tl-head.h-text{background:#EBF3FB;color:#3A7BBF;}
 .tl-head.h-audio{background:#EAF6F1;color:#2E9270;}
-#tlScroll{flex:1;overflow-x:auto;overflow-y:hidden;position:relative;}
+#tlScroll{flex:1;overflow:auto;position:relative;}
+#tlHeads{overflow:hidden;}
+#tlHeads > div{display:flex;flex-direction:column;}
 #tlContent{position:relative;height:100%;min-width:100%;}
 #ruler{display:block;height:24px;cursor:pointer;}
 .tl-lane{
@@ -272,6 +274,25 @@ body.trimming,body.trimming *{cursor:ew-resize !important;}
 .filmstrip-c img{width:54px;height:100%;object-fit:cover;flex:none;opacity:.85;}
 .clip .wave-c{position:absolute;left:0;bottom:0;pointer-events:none;}
 
+/* ===== v1.3.0 新增 ===== */
+#lane-video{height:auto !important;background:none !important;padding-bottom:3px;}
+.vrow{
+  position:relative;height:54px;margin:3px 4px 0 0;border-radius:6px;
+  background:repeating-linear-gradient(90deg,#FBF9F6 0 1px,transparent 1px 100%),#FAF8F5;
+}
+.vrow.lane-hidden{opacity:.4;}
+.vrow.lane-locked{background:repeating-linear-gradient(45deg,#F3EFEA 0 8px,#EFEAE4 8px 16px);}
+.vrow.lane-locked .clip{pointer-events:none;}
+.vrow.drag-over{outline:2px dashed var(--primary);outline-offset:-2px;}
+.vrow .row-tag{
+  position:absolute;right:4px;top:2px;font-size:9px;color:var(--ink-3);pointer-events:none;z-index:5;
+}
+.kf-mark{
+  position:absolute;bottom:2px;width:8px;height:8px;background:#fff;border:1.5px solid var(--primary);
+  transform:rotate(45deg);pointer-events:none;z-index:4;
+}
+.kf-mark.sel{background:var(--primary);}
+
 /* 滚动条 */
 ::-webkit-scrollbar{width:8px;height:9px;}
 ::-webkit-scrollbar-thumb{background:#D8D2CA;border-radius:5px;}
@@ -291,7 +312,7 @@ body.trimming,body.trimming *{cursor:ew-resize !important;}
 <header id="topbar">
   <div class="logo">
     <svg width="26" height="26" viewBox="0 0 26 26"><rect x="1" y="1" width="24" height="24" rx="7" fill="url(#lg)"/><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FF6B47"/><stop offset="1" stop-color="#E5502E"/></linearGradient></defs><path d="M8.5 8 L19 13 L8.5 18 Z" fill="#fff"/><rect x="17" y="6.5" width="2.4" height="13" rx="1.2" fill="#fff" opacity=".85" transform="rotate(24 18 13)"/></svg>
-    <span class="logo-name">咪咪<em>剪辑</em> <span style="font-size:10px;color:var(--ink-3);font-weight:normal;">v1.2.0</span></span>
+    <span class="logo-name">咪咪<em>剪辑</em> <span style="font-size:10px;color:var(--ink-3);font-weight:normal;">v1.3.0</span></span>
   </div>
   <input type="text" id="projName" value="未命名项目" title="项目名（用于导出文件命名）">
   <div class="top-sep"></div>
@@ -350,13 +371,17 @@ body.trimming,body.trimming *{cursor:ew-resize !important;}
     <div class="sep"></div>
     <button id="btnAddText">＋ 文字 <span style="color:var(--ink-3)">T</span></button>
     <button id="btnSplitAll">按播放头全分割</button>
+    <div class="sep"></div>
+    <button id="btnAddRow">＋ 视频轨</button>
+    <button id="btnDelRow">− 视频轨</button>
+    <div class="sep"></div>
     <span class="hint">拖拽片段边缘 = 裁剪 · 拖拽主体 = 移动 · 滚轮横向滚动 · Ctrl+滚轮缩放</span>
   </div>
   <div id="tlBody">
     <div id="tlHeads">
-      <div class="tl-head h-video">视频<span class="sub">视频 / 图片</span></div>
-      <div class="tl-head h-text">文字<span class="sub">标题 / 字幕</span></div>
-      <div class="tl-head h-audio">音频<span class="sub">音乐 / 音效</span></div>
+      <div id="vHeads"></div>
+      <div class="tl-head h-text" data-static="text">文字<span class="sub">标题 / 字幕</span></div>
+      <div class="tl-head h-audio" data-static="audio">音频<span class="sub">音乐 / 音效</span></div>
     </div>
     <div id="tlScroll">
       <div id="tlContent">
@@ -430,11 +455,15 @@ const state = {
   tracks: { video: [], text: [], audio: [] },  // clip 数组，按 start 排序
   selection: null,            // {track, id} 主选中
   multi: [],                  // 多选附加 id（与主选中同轨）
-  trackCfg: {                 // 轨道锁定/隐藏
-    video: { locked: false, hidden: false },
+  trackCfg: {                 // 轨道锁定/隐藏（视频按行 v0~v3）
+    v0:    { locked: false, hidden: false },
+    v1:    { locked: false, hidden: false },
+    v2:    { locked: false, hidden: false },
+    v3:    { locked: false, hidden: false },
     text:  { locked: false, hidden: false },
     audio: { locked: false, hidden: false }
   },
+  vtrackCount: 1,             // 视频轨行数（1~4，V1 在最底层）
   time: 0,
   playing: false,
   duration: 5,                // 时间轴总时长（动态计算）
@@ -575,6 +604,7 @@ function buildAutosavePayload(){
     time: state.time,
     savedAt: Date.now(),
     trackCfg: JSON.parse(JSON.stringify(state.trackCfg)),
+    vtrackCount: state.vtrackCount,
     pxPerSec: state.pxPerSec,
     assets: state.assets.map(a => ({ id: a.id, type: a.type, name: a.name, duration: a.duration, width: a.width, height: a.height })),
     tracks: JSON.parse(serializeTracks())
@@ -626,6 +656,12 @@ async function restoreAutosave(p){
   state.tracks = { video: [], text: [], audio: [] };
   for (const t of ['video','text','audio']) state.tracks[t] = p.tracks[t] || [];
   state.trackCfg = p.trackCfg ? JSON.parse(JSON.stringify(p.trackCfg)) : state.trackCfg;
+  /* 旧版 cfg 迁移：video → v0，并补齐缺失行 */
+  if (state.trackCfg.video){ state.trackCfg.v0 = state.trackCfg.video; delete state.trackCfg.video; }
+  for (let n = 0; n < 4; n++){
+    if (!state.trackCfg[rowKey(n)]) state.trackCfg[rowKey(n)] = { locked: false, hidden: false };
+  }
+  state.vtrackCount = clamp(p.vtrackCount || 1, 1, 4);
   if (p.pxPerSec) state.pxPerSec = p.pxPerSec;
   state.time = p.time || 0;
   state.selection = null; state.multi = [];
@@ -734,12 +770,17 @@ function importOne(file){
       // 先 seek 到极大值逼出真实时长，再回来（事件驱动 + 兜底重试）
       if (type === 'video' && !isFinite(el.duration)){
         let repaired = false;
+        let repairTimer = null;
         const tryFinish = () => {
           if (repaired) return;
           if (isFinite(el.duration) && el.duration > 0){
-            repaired = true;
-            try { el.currentTime = 0; } catch(e){}
-            setTimeout(finish, 80);
+            // 防抖：等 duration 连续稳定（MediaRecorder blob 会分多次报时长）
+            if (repairTimer) clearTimeout(repairTimer);
+            repairTimer = setTimeout(() => {
+              repaired = true;
+              try { el.currentTime = 0; } catch(e){}
+              finish();
+            }, 200);
           }
         };
         el.addEventListener('durationchange', tryFinish);
@@ -840,6 +881,10 @@ function renderLibrary(){
 function makeClip(type, assetId, start, dur, extra){
   const clip = {
     id: uid(), type, assetId, start, dur,
+    trackN: 0,                // 视频轨行号（0=V1 底层）
+    pip: { x: 50, y: 50, scale: 1, rot: 0 },   // 画中画变换（上排生效）
+    kf: [],                   // 关键帧 [{t, x, y, scale, opacity, rot}]
+    transIn: { type: 'none', dur: 0.5 },       // 转场入（仅 V1 层）
     speed: 1, volume: 1, muted: false,
     fadeIn: 0, fadeOut: 0,
     filter: { preset: 'none', bright: 1, contrast: 1, sat: 1 },
@@ -866,16 +911,19 @@ function createClipElement(clip){
 }
 function mediaEl(clip){ return elsByClip.get(clip.id) || null; }
 
-function addClipFromAsset(assetId, desiredStart){
+function addClipFromAsset(assetId, desiredStart, trackN){
   const a = state.assets.find(x => x.id === assetId);
   if (!a) return null;
+  const row = Math.max(0, Math.min(trackN || 0, state.vtrackCount - 1));
   const track = (a.type === 'audio') ? 'audio' : 'video';
   const dur = a.type === 'image' ? 4 : a.duration;
   if (a.type !== 'image' && (!a.duration || !isFinite(a.duration))){
     toast('素材时长无效，无法添加'); return null;
   }
-  const start = findFreeStart(state.tracks[track], dur, desiredStart || 0);
+  const start = findFreeStart(videoRowClips(row), dur, desiredStart || 0);
   const clip = makeClip(a.type === 'image' ? 'image' : track, assetId, start, dur);
+  clip.trackN = row;
+  if (row > 0) clip.pip = { x: 50, y: 50, scale: 0.4, rot: 0 };   // 上排默认画中画
   state.tracks[track].push(clip);
   state.tracks[track].sort((x, y) => x.start - y.start);
   createClipElement(clip);
@@ -967,11 +1015,60 @@ function allSelected(){
 function trackLocked(t){ return !!(state.trackCfg[t] && state.trackCfg[t].locked); }
 function trackHidden(t){ return !!(state.trackCfg[t] && state.trackCfg[t].hidden); }
 
+/* ---------- 多视频轨 / 画中画 / 关键帧 / 转场（v1.3.0） ---------- */
+const TRANSITIONS = {
+  none:     { name: '无转场' },
+  fade:     { name: '黑场淡入' },
+  dissolve: { name: '叠化（与上段）' },
+  wipeL:    { name: '划像 →' },
+  wipeR:    { name: '划像 ←' },
+  circle:   { name: '圆形展开' },
+  slideUp:  { name: '上滑入' },
+  slideDown:{ name: '下滑入' },
+  zoom:     { name: '缩放推入' }
+};
+function rowKey(n){ return 'v' + n; }
+function videoRowClips(n){ return state.tracks.video.filter(c => (c.trackN || 0) === n); }
+function maxUsedRow(){ return state.tracks.video.reduce((m, c) => Math.max(m, c.trackN || 0), 0); }
+function rowHidden(n){ return trackHidden(rowKey(n)); }
+function rowLocked(n){ return trackLocked(rowKey(n)); }
+/* 同排内与 c 首尾相接的前一个片段（转场背景来源） */
+function prevClipOf(c, n){
+  const arr = videoRowClips(n);
+  const i = arr.indexOf(c);
+  if (i > 0 && Math.abs(clipEnd(arr[i - 1]) - c.start) < 0.05) return arr[i - 1];
+  return null;
+}
+/* 关键帧插值：{x,y 画布百分比, scale 相对缩放, opacity, rot 度} */
+function clipTransform(c, localT){
+  const def = (c.trackN || 0) > 0 ? 0.4 : 1;
+  const base = Object.assign({ x: 50, y: 50, scale: def, rot: 0 }, c.pip || {});
+  const out = { x: base.x, y: base.y, scale: base.scale, opacity: 1, rot: base.rot };
+  const kf = (c.kf || []).slice().sort((a, b) => a.t - b.t);
+  if (!kf.length) return out;
+  let a = kf[0], b = kf[kf.length - 1];
+  if (localT > a.t && localT < b.t){
+    for (let i = 0; i < kf.length - 1; i++){
+      if (localT >= kf[i].t && localT <= kf[i + 1].t){ a = kf[i]; b = kf[i + 1]; break; }
+    }
+    const p = (b.t - a.t) > 0 ? (localT - a.t) / (b.t - a.t) : 0;
+    out.x = a.x + (b.x - a.x) * p;
+    out.y = a.y + (b.y - a.y) * p;
+    out.scale = a.scale + (b.scale - a.scale) * p;
+    out.opacity = a.opacity + (b.opacity - a.opacity) * p;
+    out.rot = a.rot + (b.rot - a.rot) * p;
+    return out;
+  }
+  const k = localT <= a.t ? a : b;
+  out.x = k.x; out.y = k.y; out.scale = k.scale; out.opacity = k.opacity; out.rot = k.rot;
+  return out;
+}
+
 /* 波纹删除 / 普通删除（支持多选） */
 function deleteSelected(ripple){
   let sel = allSelected();
   if (!sel.length){ toast('请先选中片段'); return; }
-  sel = sel.filter(s => !trackLocked(s.t));
+  sel = sel.filter(s => !trackLocked(s.t === 'video' ? rowKey(s.c.trackN || 0) : s.t));
   if (!sel.length){ toast('选中片段在锁定轨道上'); return; }
   pushHistory();
   if (ripple){
@@ -993,7 +1090,7 @@ function deleteSelected(ripple){
 function duplicateSelected(){
   let sel = allSelected();
   if (!sel.length){ toast('请先选中片段'); return; }
-  sel = sel.filter(s => !trackLocked(s.t));
+  sel = sel.filter(s => !trackLocked(s.t === 'video' ? rowKey(s.c.trackN || 0) : s.t));
   if (!sel.length){ toast('选中片段在锁定轨道上'); return; }
   pushHistory();
   sel.forEach(({ c, t }) => {
@@ -1018,6 +1115,16 @@ function splitClip(c, t){
   right.dur = c.dur - leftDur;
   right.in = (c.in || 0) + leftDur * (c.speed || 1);
   c.dur = leftDur;
+  /* 关键帧拆分：左保留 ≤ 分割点，右平移；转场只属于片段起点 */
+  const kfL = [], kfR = [];
+  (c.kf || []).forEach(k => {
+    if (k.t <= leftDur + 1e-6) kfL.push(k);
+    else kfR.push(Object.assign({}, k, { t: k.t - leftDur }));
+  });
+  c.kf = kfL;
+  right.kf = kfR;
+  right.kfSel = undefined;
+  right.transIn = { type: 'none', dur: 0.5 };
   state.tracks[state.selection.track].push(right);
   state.tracks[state.selection.track].sort((a, b) => a.start - b.start);
   if (right.type === 'video' || right.type === 'audio') createClipElement(right);
@@ -1027,7 +1134,9 @@ function splitClip(c, t){
 function splitSelected(){
   const c = getSel();
   if (!c){ toast('请先选中要分割的片段'); return; }
-  if (state.selection && trackLocked(state.selection.track)){ toast('该轨道已锁定'); return; }
+  if (state.selection && (state.selection.track === 'video'
+      ? rowLocked(c.trackN || 0)
+      : trackLocked(state.selection.track))){ toast('该轨道已锁定'); return; }
   const r = splitClip(c, state.time);
   if (r){ pushHistory(); toast('已分割'); }
   else toast('播放头不在选中片段范围内');
@@ -1115,7 +1224,18 @@ function renderTimeline(){
   renderClips();
 }
 function renderClips(){
-  for (const t of ['video','text','audio']){
+  const vLane = $('#lane-video');
+  vLane.innerHTML = '';
+  const rows = Math.min(Math.max(maxUsedRow() + 1, state.vtrackCount), 4);
+  for (let n = 0; n < rows; n++){
+    const row = document.createElement('div');
+    row.className = 'vrow' + (rowHidden(n) ? ' lane-hidden' : '') + (rowLocked(n) ? ' lane-locked' : '');
+    row.dataset.row = n;
+    row.innerHTML = '<span class="row-tag">V' + (n + 1) + '</span>';
+    for (const c of videoRowClips(n)) row.appendChild(buildClipDom(c, 'video'));
+    vLane.appendChild(row);
+  }
+  for (const t of ['text','audio']){
     const lane = $('#lane-' + t);
     lane.innerHTML = '';
     lane.classList.toggle('lane-hidden', trackHidden(t));
@@ -1180,8 +1300,25 @@ function drawWave(canvasEl, c, w){
   }
 }
 function renderTrackHeads(){
-  for (const t of ['video','text','audio']){
-    const head = document.querySelector('.tl-head.h-' + t);
+  const vh = $('#vHeads');
+  if (vh){
+    vh.innerHTML = '';
+    for (let n = 0; n < state.vtrackCount; n++){
+      const cfg = state.trackCfg[rowKey(n)];
+      const head = document.createElement('div');
+      head.className = 'tl-head h-video' + (cfg.hidden ? ' head-hidden' : '') + (cfg.locked ? ' head-locked' : '');
+      head.innerHTML =
+        '<div class="th-btns">' +
+          '<button class="th-btn' + (cfg.hidden ? ' on' : '') + '" data-t="' + rowKey(n) + '" data-act="hide" title="' + (cfg.hidden ? '取消隐藏' : '隐藏该轨（预览/导出跳过）') + '">' + (cfg.hidden ? '🚫' : '👁') + '</button>' +
+          '<button class="th-btn' + (cfg.locked ? ' on' : '') + '" data-t="' + rowKey(n) + '" data-act="lock" title="' + (cfg.locked ? '解除锁定' : '锁定轨道（防误编辑）') + '">' + (cfg.locked ? '🔒' : '🔓') + '</button>' +
+        '</div>' +
+        '<span class="head-title">V' + (n + 1) + '</span>' +
+        '<span class="sub">视频 / 图片</span>';
+      vh.appendChild(head);
+    }
+  }
+  for (const t of ['text','audio']){
+    const head = document.querySelector('.tl-head[data-static="' + t + '"]');
     if (!head) continue;
     const cfg = state.trackCfg[t];
     head.classList.toggle('head-hidden', cfg.hidden);
@@ -1191,8 +1328,8 @@ function renderTrackHeads(){
         '<button class="th-btn' + (cfg.hidden ? ' on' : '') + '" data-t="' + t + '" data-act="hide" title="' + (cfg.hidden ? '取消隐藏' : '隐藏轨道（预览/导出跳过）') + '">' + (cfg.hidden ? '🚫' : '👁') + '</button>' +
         '<button class="th-btn' + (cfg.locked ? ' on' : '') + '" data-t="' + t + '" data-act="lock" title="' + (cfg.locked ? '解除锁定' : '锁定轨道（防误编辑）') + '">' + (cfg.locked ? '🔒' : '🔓') + '</button>' +
       '</div>' +
-      '<span class="head-title">' + (t === 'video' ? '视频' : t === 'text' ? '文字' : '音频') + '</span>' +
-      '<span class="sub">' + (t === 'video' ? '视频 / 图片' : t === 'text' ? '标题 / 字幕' : '音乐 / 音效') + '</span>';
+      '<span class="head-title">' + (t === 'text' ? '文字' : '音频') + '</span>' +
+      '<span class="sub">' + (t === 'text' ? '标题 / 字幕' : '音乐 / 音效') + '</span>';
   }
 }
 function toggleTrack(t, act){
@@ -1200,8 +1337,20 @@ function toggleTrack(t, act){
   if (act === 'lock') cfg.locked = !cfg.locked;
   if (act === 'hidden') cfg.hidden = !cfg.hidden;
   renderTrackHeads(); renderClips(); scheduleAutosave();
-  toast((act === 'lock' ? (cfg.locked ? '已锁定' : '已解锁') : (cfg.hidden ? '已隐藏' : '已显示')) +
-    (t === 'video' ? '视频轨' : t === 'text' ? '文字轨' : '音频轨'));
+  const label = t.charAt(0) === 'v' ? 'V' + (parseInt(t.slice(1)) + 1) + ' 轨' : t === 'text' ? '文字轨' : '音频轨';
+  toast((act === 'lock' ? (cfg.locked ? '已锁定 ' : '已解锁 ') : (cfg.hidden ? '已隐藏 ' : '已显示 ')) + label);
+}
+function addVideoRow(){
+  if (state.vtrackCount >= 4){ toast('最多支持 4 条视频轨'); return; }
+  state.vtrackCount++;
+  renderTrackHeads(); renderClips(); scheduleAutosave();
+}
+function removeVideoRow(){
+  const last = state.vtrackCount - 1;
+  if (last < 1){ toast('至少保留 1 条视频轨'); return; }
+  if (videoRowClips(last).length){ toast('V' + (last + 1) + ' 轨上还有片段，请先移走或删除'); return; }
+  state.vtrackCount = last;
+  renderTrackHeads(); renderClips(); scheduleAutosave();
 }
 function isClipSelected(c){
   return (state.selection && state.selection.id === c.id) || state.multi.includes(c.id);
@@ -1233,6 +1382,20 @@ function buildClipDom(c, track){
     '<div class="clip-label">' + esc(c.type === 'text' ? 'T 文字' : (asset ? asset.name : '缺失素材')) + '</div>' +
     '<div class="clip-sub">' + sub + '</div>' +
     '<div class="handle l"></div><div class="handle r"></div>';
+  if (c.type === 'video' || c.type === 'image'){
+    for (const k of (c.kf || [])){
+      const m = document.createElement('div');
+      m.className = 'kf-mark' + (c.kfSel === c.kf.indexOf(k) ? ' sel' : '');
+      m.style.left = clamp(k.t * state.pxPerSec, 2, Math.max(2, c.dur * state.pxPerSec - 10)) + 'px';
+      el.appendChild(m);
+    }
+    if ((c.trackN || 0) === 0 && c.transIn && c.transIn.type !== 'none'){
+      const flag = document.createElement('div');
+      flag.style.cssText = 'position:absolute;top:2px;right:4px;font-size:8px;color:#fff;background:var(--primary);border-radius:4px;padding:0 4px;pointer-events:none;z-index:4;';
+      flag.textContent = '转场';
+      el.appendChild(flag);
+    }
+  }
   return el;
 }
 
@@ -1247,7 +1410,8 @@ tlContent.addEventListener('mousedown', e => {
     const track = ['video','text','audio'].find(t => state.tracks[t].some(c => c.id === id));
     const clip = getClip(id);
     if (!track || !clip) return;
-    if (trackLocked(track)){ scrubTo(e); drag = { mode: 'scrub' }; return; }  // 锁定轨：只允许拖播放头
+    const lk = track === 'video' ? rowLocked(clip.trackN || 0) : trackLocked(track);
+    if (lk){ scrubTo(e); drag = { mode: 'scrub' }; return; }  // 锁定轨：只允许拖播放头
     const alreadySel = isClipSelected(clip);
     if (e.shiftKey) toggleSelection(track, id);
     else if (!alreadySel) selectClip(track, id);
@@ -1296,7 +1460,7 @@ window.addEventListener('mousemove', e => {
     let ns = Math.max(0, o.start + dt);
     ns = applySnap(ns, c, o, drag.group);
     if (drag.track === 'video'){
-      ns = clampToNeighbors(state.tracks.video, c.id, ns, c.dur,
+      ns = clampToNeighbors(videoRowClips(c.trackN || 0), c.id, ns, c.dur,
         drag.group ? drag.group.map(g => g.c.id) : null);
     }
     const delta = ns - o.start;
@@ -1416,22 +1580,34 @@ $$('.tl-lane').forEach(lane => {
     if (!dragAssetId) return;
     e.preventDefault();
     lane.classList.add('drag-over');
+    const row = e.target.closest && e.target.closest('.vrow');
+    $$('.vrow').forEach(r => r.classList.remove('drag-over'));
+    if (row) row.classList.add('drag-over');
   });
-  lane.addEventListener('dragleave', () => lane.classList.remove('drag-over'));
+  lane.addEventListener('dragleave', e => {
+    lane.classList.remove('drag-over');
+    const row = e.target.closest && e.target.closest('.vrow');
+    if (row) row.classList.remove('drag-over');
+  });
   lane.addEventListener('drop', e => {
     lane.classList.remove('drag-over');
+    $$('.vrow').forEach(r => r.classList.remove('drag-over'));
     if (!dragAssetId) return;
     e.preventDefault();
     const asset = state.assets.find(a => a.id === dragAssetId);
     dragAssetId = null;
     if (!asset) return;
-    if (asset.type === 'audio' && lane.dataset.track !== 'audio'){ toast('音频素材请拖到音频轨'); return; }
-    if (asset.type !== 'audio' && lane.dataset.track !== 'video'){ toast('视频 / 图片素材请拖到视频轨'); return; }
+    const isVideoLane = lane.dataset.track === 'video';
+    if (asset.type === 'audio' && !isVideoLane && lane.dataset.track !== 'audio'){ toast('音频素材请拖到音频轨'); return; }
+    if (asset.type === 'audio' && isVideoLane){ toast('音频素材请拖到音频轨'); return; }
+    if (asset.type !== 'audio' && !isVideoLane){ toast('视频 / 图片素材请拖到视频轨'); return; }
     const rect = tlContent.getBoundingClientRect();
     const desired = Math.max(0, (e.clientX - rect.left) / state.pxPerSec);
+    const rowEl = e.target.closest ? e.target.closest('.vrow') : null;
+    const row = rowEl ? parseInt(rowEl.dataset.row, 10) || 0 : 0;
     pushHistory();
-    const c = addClipFromAsset(asset.id, desired);
-    if (c){ selectClip(lane.dataset.track, c.id); toast('已添加到时间轴'); }
+    const c = addClipFromAsset(asset.id, desired, row);
+    if (c){ selectClip(isVideoLane ? 'video' : 'audio', c.id); toast('已添加到时间轴'); }
   });
 });
 
@@ -1440,6 +1616,13 @@ function selectClip(track, id){
   state.selection = { track, id };
   renderClips(); buildProps(); updateToolbar();
 }
+/* 滑条/画布拖拽的当前编辑目标：选中的关键帧优先，否则片段基础变换 */
+function getTransformTarget(c){
+  if (c.kf && c.kf.length && typeof c.kfSel === 'number' && c.kf[c.kfSel]) return c.kf[c.kfSel];
+  if (!c.pip) c.pip = { x: 50, y: 50, scale: (c.trackN || 0) > 0 ? 0.4 : 1, rot: 0 };
+  return c.pip;
+}
+
 function buildProps(){
   const body = $('#propsBody'), empty = $('#propsEmpty');
   const c = getSel();
@@ -1484,6 +1667,36 @@ function buildProps(){
       '<div class="prop-row"><label>亮度</label><input type="range" id="pBright" min="0.3" max="2" step="0.05" value="' + c.filter.bright + '"><span class="val">' + c.filter.bright.toFixed(2) + '</span></div>' +
       '<div class="prop-row"><label>对比度</label><input type="range" id="pContrast" min="0.3" max="2" step="0.05" value="' + c.filter.contrast + '"><span class="val">' + c.filter.contrast.toFixed(2) + '</span></div>' +
       '<div class="prop-row"><label>饱和度</label><input type="range" id="pSat" min="0" max="2.5" step="0.05" value="' + c.filter.sat + '"><span class="val">' + c.filter.sat.toFixed(2) + '</span></div>' +
+      '</div>';
+  }
+
+  // 转场 / 画中画变换 / 关键帧（视频/图片，v1.3.0）
+  if (c.type === 'video' || c.type === 'image'){
+    const rowN = c.trackN || 0;
+    if (rowN === 0){
+      html += '<div class="prop-group"><div class="g-title">🎞 转场入（与上一段衔接）</div>' +
+        '<div class="prop-row"><label>类型</label><select id="pTrans">' +
+        Object.entries(TRANSITIONS).map(([k, t]) =>
+          '<option value="' + k + '"' + ((c.transIn && c.transIn.type) === k ? ' selected' : '') + '>' + t.name + '</option>').join('') +
+        '</select></div>' +
+        '<div class="prop-row"><label>时长</label><input type="range" id="pTransDur" min="0.1" max="1.5" step="0.1" value="' + ((c.transIn && c.transIn.dur) || 0.5) + '"><span class="val">' + ((c.transIn && c.transIn.dur) || 0.5).toFixed(1) + 's</span></div></div>';
+    }
+    const tfTgt = getTransformTarget(c);
+    html += '<div class="prop-group"><div class="g-title">' + (rowN > 0 ? '🖼 画中画变换' : '🎬 变换') +
+      (c.kf && c.kf.length && typeof c.kfSel === 'number' && c.kf[c.kfSel] ? '（编辑关键帧 ' + c.kf[c.kfSel].t.toFixed(2) + 's）' : '') + '</div>' +
+      '<div class="prop-row"><label>位置X</label><input type="range" id="pPipX" min="0" max="100" step="1" value="' + Math.round(tfTgt.x) + '"><span class="val">' + Math.round(tfTgt.x) + '%</span></div>' +
+      '<div class="prop-row"><label>位置Y</label><input type="range" id="pPipY" min="0" max="100" step="1" value="' + Math.round(tfTgt.y) + '"><span class="val">' + Math.round(tfTgt.y) + '%</span></div>' +
+      '<div class="prop-row"><label>缩放</label><input type="range" id="pPipScale" min="0.1" max="2" step="0.05" value="' + tfTgt.scale.toFixed(2) + '"><span class="val">' + tfTgt.scale.toFixed(2) + '</span></div>' +
+      '<div class="prop-row"><label>旋转</label><input type="range" id="pPipRot" min="-180" max="180" step="5" value="' + Math.round(tfTgt.rot) + '"><span class="val">' + Math.round(tfTgt.rot) + '°</span></div>' +
+      '</div>';
+    html += '<div class="prop-group"><div class="g-title">⏱ 关键帧动画</div>' +
+      '<div class="prop-row"><button id="pKfAdd" style="flex:1;">◆ 在播放头添加关键帧</button></div>' +
+      ((c.kf || []).map((k, i) =>
+        '<div class="prop-row"><label>' + k.t.toFixed(2) + 's</label>' +
+        '<button data-kfjump="' + i + '" style="flex:1;">跳转</button>' +
+        '<button data-kfsel="' + i + '" style="flex:1;' + (c.kfSel === i ? 'border-color:var(--primary);color:var(--primary);' : '') + '">' + (c.kfSel === i ? '● 编辑中' : '选中') + '</button>' +
+        '<button data-kfdel="' + i + '" style="width:44px;color:#E5502E;">删</button></div>').join('')) +
+      '<div style="font-size:10px;color:var(--ink-3);margin-top:4px;">两个关键帧之间线性插值；上排片段默认缩小居中，可直接在预览画布拖动</div>' +
       '</div>';
   }
 
@@ -1546,6 +1759,68 @@ function buildProps(){
   }
   const mute = $('#pMute');
   if (mute) mute.addEventListener('change', () => { pushHistory(); c.muted = mute.checked; applyClipVolume(c); renderClips(); });
+
+  const transSel = $('#pTrans');
+  if (transSel) transSel.addEventListener('change', () => {
+    pushHistory();
+    c.transIn = c.transIn || { type: 'none', dur: 0.5 };
+    c.transIn.type = transSel.value;
+    drawFrame(); renderClips();
+  });
+  const transDur = $('#pTransDur');
+  if (transDur){
+    transDur.addEventListener('input', () => {
+      c.transIn = c.transIn || { type: 'fade', dur: 0.5 };
+      c.transIn.dur = parseFloat(transDur.value);
+      const v = transDur.nextElementSibling;
+      if (v) v.textContent = c.transIn.dur.toFixed(1) + 's';
+      drawFrame();
+    });
+    transDur.addEventListener('change', () => pushHistory());
+  }
+  const bindTf = (id, prop, fmt) => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const tgt = getTransformTarget(c);
+      tgt[prop] = parseFloat(el.value);
+      const v = el.nextElementSibling;
+      if (v) v.textContent = fmt(tgt[prop]);
+      drawFrame();
+    });
+    el.addEventListener('change', () => pushHistory());
+  };
+  bindTf('#pPipX', 'x', v => Math.round(v) + '%');
+  bindTf('#pPipY', 'y', v => Math.round(v) + '%');
+  bindTf('#pPipScale', 'scale', v => v.toFixed(2));
+  bindTf('#pPipRot', 'rot', v => Math.round(v) + '°');
+  const kfAdd = $('#pKfAdd');
+  if (kfAdd) kfAdd.addEventListener('click', () => {
+    pushHistory();
+    const localT = clamp(state.time - c.start, 0, c.dur);
+    const cur = clipTransform(c, localT);
+    if (!c.kf) c.kf = [];
+    const entry = { t: localT, x: cur.x, y: cur.y, scale: cur.scale, opacity: cur.opacity, rot: cur.rot };
+    const exist = c.kf.findIndex(k => Math.abs(k.t - localT) < 0.02);
+    if (exist >= 0) c.kf[exist] = entry; else c.kf.push(entry);
+    c.kfSel = c.kf.indexOf(entry);
+    buildProps(); renderClips(); drawFrame();
+    toast('已添加关键帧 @ ' + localT.toFixed(2) + 's');
+  });
+  $$('#propsBody [data-kfjump]').forEach(b => b.addEventListener('click', () => {
+    seek(c.start + c.kf[+b.dataset.kfjump].t);
+    buildProps();
+  }));
+  $$('#propsBody [data-kfsel]').forEach(b => b.addEventListener('click', () => {
+    c.kfSel = +b.dataset.kfsel;
+    buildProps();
+  }));
+  $$('#propsBody [data-kfdel]').forEach(b => b.addEventListener('click', () => {
+    pushHistory();
+    c.kf.splice(+b.dataset.kfdel, 1);
+    c.kfSel = undefined;
+    buildProps(); renderClips(); drawFrame();
+  }));
 
   $$('#propsBody .f-preset').forEach(p => p.addEventListener('click', () => {
     pushHistory();
@@ -1631,15 +1906,14 @@ function seek(t){
 /* 同步各片段媒体元素到当前时间 */
 function syncMedia(){
   for (const t of ['video','audio']){
-    if (trackHidden(t)){
-      for (const c of state.tracks[t]){
-        const el = mediaEl(c);
-        if (el && !el.paused){ try { el.pause(); } catch(e){} }
-      }
-      continue;
-    }
     for (const c of state.tracks[t]){
       if (c.type === 'image') continue;   // 图片片段无媒体时钟
+      const key = t === 'video' ? rowKey(c.trackN || 0) : t;
+      if (trackHidden(key)){
+        const hel = mediaEl(c);
+        if (hel && !hel.paused){ try { hel.pause(); } catch(e){} }
+        continue;
+      }
       const el = mediaEl(c);
       if (!el) continue;
       const active = state.time >= c.start - 0.02 && state.time < clipEnd(c);
@@ -1677,6 +1951,69 @@ function filterStr(f){
   if (f.sat !== 1) parts.push('saturate(' + f.sat + ')');
   return parts.join(' ') || 'none';
 }
+/* 带变换的片段层绘制：tr={x,y(%) scale,opacity,rot}，支持转场裁剪/位移/缩放 */
+function clipSourceDims(c, el){
+  return c.type === 'video' ? [el.videoWidth, el.videoHeight] : [el.naturalWidth, el.naturalHeight];
+}
+function drawClipLayer(c, el, tr, alphaMul, opts){
+  opts = opts || {};
+  const dims = clipSourceDims(c, el);
+  if (!dims[0] || !dims[1]) return;
+  ctx.save();
+  ctx.globalAlpha = clamp(tr.opacity * alphaMul, 0, 1);
+  if (opts.clipFn){ ctx.beginPath(); opts.clipFn(); ctx.clip(); }
+  ctx.translate(tr.x / 100 * CW + (opts.dx || 0), tr.y / 100 * CH + (opts.dy || 0));
+  if (tr.rot) ctx.rotate(tr.rot * Math.PI / 180);
+  const sc = tr.scale * (opts.scaleMul || 1);
+  ctx.filter = filterStr(c.filter);
+  drawSourceIntoBox(el, dims[0], dims[1], CW * sc, CH * sc);
+  ctx.restore();
+  ctx.filter = 'none';
+  ctx.globalAlpha = 1;
+}
+/* 转场背景：前一片段末帧（预览懒 seek 允许短暂陈旧；导出前已精确 seek） */
+function drawTransitionBackdrop(prev){
+  const el = mediaEl(prev);
+  if (!el) return false;
+  const speed = prev.speed || 1;
+  if (prev.type === 'video'){
+    const targetEnd = (prev.in || 0) + Math.max(0, prev.dur - 0.02) * speed;
+    if (!el.seeking && Math.abs(el.currentTime - targetEnd) > 0.2){
+      try { el.currentTime = targetEnd; } catch(e){}
+    }
+    if (el.readyState < 2) return false;
+    ctx.filter = filterStr(prev.filter);
+    drawCover(el, el.videoWidth, el.videoHeight);
+    ctx.filter = 'none';
+    return true;
+  }
+  if (prev.type === 'image' && el.complete && el.naturalWidth){
+    ctx.filter = filterStr(prev.filter);
+    drawCover(el, el.naturalWidth, el.naturalHeight);
+    ctx.filter = 'none';
+    return true;
+  }
+  return false;
+}
+function drawTransition(c, el, tr, prev, p, fa){
+  const type = c.transIn.type;
+  if (prev) drawTransitionBackdrop(prev);
+  if (type === 'fade' || type === 'dissolve'){
+    drawClipLayer(c, el, tr, fa * p);
+  } else if (type === 'zoom'){
+    drawClipLayer(c, el, tr, fa * p, { scaleMul: 0.5 + 0.5 * p });
+  } else if (type === 'wipeL' || type === 'wipeR' || type === 'circle'){
+    drawClipLayer(c, el, tr, fa, {
+      clipFn: () => {
+        if (type === 'wipeL') ctx.rect(0, 0, p * CW, CH);
+        else if (type === 'wipeR') ctx.rect(CW - p * CW, 0, p * CW, CH);
+        else ctx.arc(CW / 2, CH / 2, p * Math.hypot(CW, CH) / 2, 0, Math.PI * 2);
+      }
+    });
+  } else if (type === 'slideUp' || type === 'slideDown'){
+    drawClipLayer(c, el, tr, fa, { dy: (1 - p) * CH * (type === 'slideUp' ? -1 : 1) });
+  }
+}
 function drawFrame(){
   ctx.filter = 'none';
   ctx.globalAlpha = 1;
@@ -1684,27 +2021,26 @@ function drawFrame(){
   ctx.fillRect(0, 0, CW, CH);
   let hasPicture = false;
 
-  // 视频轨（单轨顺序播放，同刻只可能有一个激活；隐藏轨跳过）
-  for (const c of state.tracks.video){
-    if (trackHidden('video')) break;
-    if (state.time < c.start || state.time >= clipEnd(c)) continue;
-    const el = mediaEl(c);
-    hasPicture = true;
-    if (!el){ drawMissing(c); continue; }
-    const alpha = fadeAlpha(c);
-    ctx.globalAlpha = alpha;
-    if (c.type === 'video' && el.readyState >= 2){
-      ctx.filter = filterStr(c.filter);
-      drawCover(el, el.videoWidth, el.videoHeight);
-      ctx.filter = 'none';
-    } else if (c.type === 'image' && el.complete && el.naturalWidth){
-      ctx.filter = filterStr(c.filter);
-      drawCover(el, el.naturalWidth, el.naturalHeight);
-      ctx.filter = 'none';
+  // 视频多轨：V1 底层 → 高层叠加（画中画）
+  const rows = Math.min(Math.max(maxUsedRow() + 1, state.vtrackCount), 4);
+  for (let n = 0; n < rows; n++){
+    if (rowHidden(n)) continue;
+    for (const c of videoRowClips(n)){
+      if (state.time < c.start || state.time >= clipEnd(c)) continue;
+      const el = mediaEl(c);
+      hasPicture = true;
+      if (!el){ if (n === 0) drawMissing(c); continue; }
+      const localT = state.time - c.start;
+      const tr = clipTransform(c, localT);
+      const fa = fadeAlpha(c);
+      const trans = (c.transIn && c.transIn.type && c.transIn.type !== 'none') ? c.transIn : null;
+      if (trans && n === 0 && localT < trans.dur){
+        drawTransition(c, el, tr, prevClipOf(c, n), localT / Math.max(0.05, trans.dur), fa);
+      } else {
+        drawClipLayer(c, el, tr, fa);
+      }
     }
-    ctx.globalAlpha = 1;
   }
-  // 图片轨之外：时间轴上若无视频片段但有图片 → 已含在 video 轨
   // 文字
   for (const c of state.tracks.text){
     if (trackHidden('text')) break;
@@ -1720,6 +2056,13 @@ function drawCover(el, w, h){
   const s = Math.max(CW / w, CH / h);
   const dw = w * s, dh = h * s;
   ctx.drawImage(el, (CW - dw) / 2, (CH - dh) / 2, dw, dh);
+}
+/* 以当前原点为中心，把源画面 cover 进 boxW×boxH 区域 */
+function drawSourceIntoBox(el, srcW, srcH, boxW, boxH){
+  if (!srcW || !srcH) return;
+  const s = Math.max(boxW / srcW, boxH / srcH);
+  const dw = srcW * s, dh = srcH * s;
+  ctx.drawImage(el, -dw / 2, -dh / 2, dw, dh);
 }
 function drawMissing(c){
   ctx.fillStyle = '#2B2926';
@@ -1775,8 +2118,9 @@ function roundRect(x, y, w, h, r){
   ctx.closePath();
 }
 
-/* 预览画布上拖动文字位置 */
+/* 预览画布上拖动文字/画中画位置 */
 let textDrag = null;
+let pipDrag = null;
 cv.addEventListener('mousedown', e => {
   if (exporting) return;
   const rect = cv.getBoundingClientRect();
@@ -1799,8 +2143,40 @@ cv.addEventListener('mousedown', e => {
       return;
     }
   }
+  // 画中画/变换拖拽：从最上层视频行往下找命中片段
+  for (let n = Math.min(maxUsedRow(), 3); n >= 0; n--){
+    if (rowHidden(n)) continue;
+    const vAct = videoRowClips(n).filter(c => (c.type === 'video' || c.type === 'image') &&
+      state.time >= c.start && state.time < clipEnd(c));
+    for (let i = vAct.length - 1; i >= 0; i--){
+      const c = vAct[i];
+      const tr = clipTransform(c, state.time - c.start);
+      const bw = CW * tr.scale, bh = CH * tr.scale;
+      const cx = tr.x / 100 * CW, cy = tr.y / 100 * CH;
+      if (Math.abs(mx - cx) <= bw / 2 && Math.abs(my - cy) <= bh / 2){
+        const editable = n > 0 || (c.kf && c.kf.length);
+        if (!editable) return;   // 底层全屏片段不允许画布拖拽
+        pipDrag = { clip: c, sx: mx, sy: my, ox: getTransformTarget(c).x, oy: getTransformTarget(c).y };
+        selectClip('video', c.id);
+        cv.style.cursor = 'grabbing';
+        e.preventDefault();
+        return;
+      }
+    }
+  }
 });
 window.addEventListener('mousemove', e => {
+  if (pipDrag){
+    const rect = cv.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) / rect.width * CW;
+    const my = (e.clientY - rect.top) / rect.height * CH;
+    const tgt = getTransformTarget(pipDrag.clip);
+    tgt.x = clamp(pipDrag.ox + (mx - pipDrag.sx) / CW * 100, 0, 100);
+    tgt.y = clamp(pipDrag.oy + (my - pipDrag.sy) / CH * 100, 0, 100);
+    drawFrame();
+    if (state.selection && state.selection.id === pipDrag.clip.id) buildProps();
+    return;
+  }
   if (!textDrag) return;
   const rect = cv.getBoundingClientRect();
   const mx = (e.clientX - rect.left) / rect.width * CW;
@@ -1816,6 +2192,12 @@ window.addEventListener('mousemove', e => {
   }
 });
 window.addEventListener('mouseup', () => {
+  if (pipDrag){
+    pushHistory();
+    pipDrag = null;
+    cv.style.cursor = 'default';
+    return;
+  }
   if (textDrag){
     if (textDrag.moved) pushHistory();
     textDrag = null;
@@ -2130,8 +2512,9 @@ async function pickExportMode(){
 function audioSourceClips(){
   const out = [];
   for (const t of ['audio','video']){
-    if (trackHidden(t)) continue;
     for (const c of state.tracks[t]){
+      const key = t === 'video' ? rowKey(c.trackN || 0) : t;
+      if (trackHidden(key)) continue;
       if (c.type === 'audio' || c.type === 'video') out.push(c);
     }
   }
@@ -2215,14 +2598,28 @@ async function exportMp4Blob(onProgress){
   for (let f = 0; f < totalFrames; f++){
     if (frameCancel) { try { encoder.close(); } catch(e){} throw new Error('cancelled'); }
     const t = f / fps;
-    for (const c of state.tracks.video){
-      if (c.type !== 'video' || trackHidden('video')) continue;
-      if (t < c.start || t >= clipEnd(c)) continue;
+    /* 多轨激活片段 seek（隐藏行跳过） */
+    const actives = state.tracks.video.filter(c => c.type === 'video' &&
+      !rowHidden(c.trackN || 0) && t >= c.start && t < clipEnd(c));
+    for (const c of actives){
       const el = mediaEl(c);
       if (!el) continue;
       await waitForReady(el);
       const target = (c.in || 0) + (t - c.start) * (c.speed || 1);
       if (Math.abs(el.currentTime - target) > 0.001) await seekEl(el, target);
+    }
+    /* V1 层转场：背景片段 seek 到末帧 */
+    for (const c of actives){
+      if ((c.trackN || 0) !== 0) continue;
+      const trans = c.transIn;
+      if (!trans || trans.type === 'none' || trans.type === 'fade' || t - c.start >= trans.dur) continue;
+      const prev = prevClipOf(c, 0);
+      if (!prev || prev.type !== 'video') continue;
+      const pel = mediaEl(prev);
+      if (!pel) continue;
+      const tEnd = (prev.in || 0) + Math.max(0, prev.dur - 0.02) * (prev.speed || 1);
+      await waitForReady(pel);
+      if (Math.abs(pel.currentTime - tEnd) > 0.001) await seekEl(pel, tEnd);
     }
     state.time = t;
     drawFrame();
@@ -2568,6 +2965,11 @@ function init(){
   requestAnimationFrame(ts => { lastTs = ts; requestAnimationFrame(tick); });
   // 项目名变更 → 自动保存
   $('#projName').addEventListener('change', scheduleAutosave);
+  // 视频轨行增删
+  $('#btnAddRow').addEventListener('click', addVideoRow);
+  $('#btnDelRow').addEventListener('click', removeVideoRow);
+  // 时间轴纵向滚动时同步轨道头
+  tlScroll.addEventListener('scroll', () => { $('#tlHeads').scrollTop = tlScroll.scrollTop; });
   // 轨道头 锁定/隐藏 按钮（事件委托，renderTrackHeads 重绘不影响）
   $('#tlHeads').addEventListener('click', e => {
     const btn = e.target.closest('.th-btn');
@@ -2596,6 +2998,7 @@ window.__ov = {
   toggleTrack, renderTrackHeads,
   performAutosave, loadAutosave, restoreAutosave, discardAutosave, buildAutosavePayload,
   pickExportMode, exportMp4Blob, openExportChoice, mp4Concat,
+  clipTransform, getTransformTarget, prevClipOf, videoRowClips,
   cv, ctx,
   snapTo: t => { state.time = t; $('#playhead').style.left = (t * state.pxPerSec) + 'px'; }
 };

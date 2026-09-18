@@ -117,6 +117,14 @@ function makeVideoFile(){
     } catch(e){ reject(e); }
   });
 }
+/* 测试素材：纯绿色 PNG（多轨层叠断言用） */
+function makeGreenFile(){
+  const c = document.createElement('canvas');
+  c.width = 320; c.height = 180;
+  const g = c.getContext('2d');
+  g.fillStyle = '#22AA22'; g.fillRect(0, 0, 320, 180);
+  return new Promise(res => c.toBlob(b => res(new File([b], '绿图.png', { type: 'image/png' })), 'image/png'));
+}
 /* 测试素材：0.5s 440Hz 正弦 WAV */
 function makeAudioFile(){
   const sr = 22050, n = Math.floor(sr * 0.5);
@@ -330,30 +338,32 @@ async function run(){
   log('T16 Ctrl+D 复制片段', OV.state.tracks.video.length === cntBefore + 1 && dups.length >= 1,
       'count ' + cntBefore + '→' + OV.state.tracks.video.length + ' copy.start=' + (dups[0] ? dups[0].start : '?'));
 
-  /* T17 轨道锁定 / 隐藏 */
-  OV.toggleTrack('video', 'lock');
-  const lockBtn = document.querySelector('.th-btn[data-t="video"][data-act="lock"]');
+  /* T17 轨道锁定 / 隐藏（v1.3.0：视频轨配置键为 v0） */
+  OV.toggleTrack('v0', 'lock');
+  const lockBtn = document.querySelector('.th-btn[data-t="v0"][data-act="lock"]');
   const lockUi = !!lockBtn && lockBtn.classList.contains('on');
   OV.selectClip('video', cD.id);
+  const selLen = OV.allSelected().length;
   const beforeLockDel = OV.state.tracks.video.length;
   OV.deleteSelected(false);
-  const lockProtect = OV.state.tracks.video.length === beforeLockDel;
-  OV.toggleTrack('video', 'lock');
-  OV.toggleTrack('video', 'hidden');
+  const afterLockDel = OV.state.tracks.video.length;
+  const lockProtect = afterLockDel === beforeLockDel;
+  OV.toggleTrack('v0', 'lock');
+  OV.toggleTrack('v0', 'hidden');
   OV.snapTo(0.5);
   await sleep(300);
   const hiddenBlack = isBlack(px(640, 360));
-  OV.toggleTrack('video', 'hidden');
+  OV.toggleTrack('v0', 'hidden');
   OV.drawFrame();
-  const manualRgb = px(640, 360);
   await sleep(200);
   const backRgb = px(640, 360);
   const shownBack = !isBlack(backRgb);
   const clipDbg = OV.state.tracks.video.map(c => c.start + '-' + (c.start + c.dur)).join(',');
-  log('T17 锁定轨道防误删', lockUi && lockProtect, 'ui=' + lockUi + ' protect=' + lockProtect);
+  log('T17 锁定轨道防误删', lockUi && lockProtect,
+      'ui=' + lockUi + ' sel=' + selLen + ' len ' + beforeLockDel + '→' + afterLockDel);
   log('T17b 隐藏轨道后画面跳过（黑屏）且恢复', hiddenBlack && shownBack,
-      'hidden=' + hiddenBlack + ' restored=' + shownBack + ' manual=' + manualRgb.join(',') +
-      ' clips=[' + clipDbg + '] hidden=' + OV.state.trackCfg.video.hidden);
+      'hidden=' + hiddenBlack + ' restored=' + shownBack + ' back=' + backRgb.join(',') +
+      ' clips=[' + clipDbg + '] hidden=' + OV.state.trackCfg.v0.hidden);
 
   /* T18 自动保存 + 恢复（IndexedDB 含媒体文件） */
   OV.selectClip('video', OV.state.tracks.video[0].id);
@@ -446,6 +456,66 @@ async function run(){
     log('T20 MP4 导出（ftyp 头 + 体积）', true, '环境不支持 WebCodecs，WebM 兜底生效（跳过）');
     log('T20b 浏览器解析 MP4（时长/分辨率/画面像素）', true, '跳过');
   }
+
+  /* ===== v1.3.0 新增 ===== */
+
+  /* T21 多视频轨 + 画中画：V1 红蓝图全屏，V2 绿图缩小居中 */
+  document.getElementById('btnAddRow').click();   // vtrackCount → 2
+  await sleep(150);
+  const gFile = await makeGreenFile();
+  await OV.importFiles([gFile]);
+  const gAsset = OV.state.assets.find(a => a.name === '绿图');
+  for (const c of [...OV.state.tracks.video]) OV.removeClip('video', c.id);
+  const rClip = OV.addClipFromAsset(imgAsset.id, 0);      // V1 全屏
+  rClip.dur = 4; rClip.fadeIn = 0; rClip.fadeOut = 0;
+  const gClip = OV.addClipFromAsset(gAsset.id, 0, 1);     // V2 画中画
+  gClip.dur = 4; gClip.fadeIn = 0; gClip.fadeOut = 0;
+  OV.recalcDuration();
+  log('T21a 第二行视频轨已创建', OV.state.vtrackCount === 2 &&
+      document.querySelectorAll('#lane-video .vrow').length === 2);
+  OV.snapTo(1);
+  await sleep(300);
+  const cPixel = px(640, 360);
+  const ePixel = px(80, 80);
+  log('T21b 画中画层叠（中心=V2 绿，边角=V1 红）',
+      cPixel[1] > 120 && cPixel[0] < 90 && cPixel[2] < 90 && ePixel[0] > 150 && ePixel[1] < 90,
+      'center=' + cPixel.join(',') + ' edge=' + ePixel.join(','));
+
+  /* T22 关键帧动画：绿图 V2 不透明度 0→1（本地 0→1s），t=0.5 时半透明 */
+  OV.selectClip('video', gClip.id);
+  gClip.kf = [
+    { t: 0, x: 50, y: 50, scale: 0.4, opacity: 0, rot: 0 },
+    { t: 1, x: 50, y: 50, scale: 0.4, opacity: 1, rot: 0 }
+  ];
+  OV.renderClips();   // 关键帧标记渲染到片段 DOM
+  OV.snapTo(0.5);
+  await sleep(300);
+  const midP = px(640, 360);
+  OV.snapTo(1.2);
+  await sleep(250);
+  const fullP = px(640, 360);
+  const kfMarks = document.querySelectorAll('#lane-video .kf-mark').length;
+  log('T22 关键帧线性插值（半透明混合→全绿）+ 菱形标记',
+      midP[1] > 100 && midP[0] < 100 && fullP[1] > 140 && kfMarks >= 2,
+      'mid=' + midP.join(',') + ' full=' + fullP.join(',') + ' marks=' + kfMarks);
+
+  /* T23 转场库：V1 两段相邻，B 叠化 0.5s，t=2.25 应为 A 末帧与 B(绿) 混合 */
+  for (const c of [...OV.state.tracks.video]) OV.removeClip('video', c.id);
+  OV.state.vtrackCount = 1;
+  OV.renderTrackHeads(); OV.renderClips();
+  const tA = OV.addClipFromAsset(imgAsset.id, 0); tA.dur = 2; tA.fadeIn = 0; tA.fadeOut = 0;
+  const tB = OV.addClipFromAsset(gAsset.id, 2); tB.dur = 2; tB.fadeIn = 0; tB.fadeOut = 0;
+  tB.transIn = { type: 'dissolve', dur: 0.5 };
+  OV.recalcDuration();
+  OV.snapTo(2.25);
+  await sleep(350);
+  const mixP = px(640, 360);
+  OV.snapTo(2.6);
+  await sleep(250);
+  const afterP = px(640, 360);
+  log('T23 叠化转场（中点部分混合→结束全绿）',
+      mixP[1] > 90 && mixP[1] < 160 && mixP[2] > 50 && afterP[1] > 150 && afterP[2] < 90,
+      'mix=' + mixP.join(',') + ' after=' + afterP.join(','));
 
   finish();
 }
