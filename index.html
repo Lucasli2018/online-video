@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>咪咪剪辑 · online-video v1.1.0</title>
+<title>咪咪剪辑 · online-video v1.2.0</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <style>
 :root{
@@ -291,7 +291,7 @@ body.trimming,body.trimming *{cursor:ew-resize !important;}
 <header id="topbar">
   <div class="logo">
     <svg width="26" height="26" viewBox="0 0 26 26"><rect x="1" y="1" width="24" height="24" rx="7" fill="url(#lg)"/><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FF6B47"/><stop offset="1" stop-color="#E5502E"/></linearGradient></defs><path d="M8.5 8 L19 13 L8.5 18 Z" fill="#fff"/><rect x="17" y="6.5" width="2.4" height="13" rx="1.2" fill="#fff" opacity=".85" transform="rotate(24 18 13)"/></svg>
-    <span class="logo-name">咪咪<em>剪辑</em> <span style="font-size:10px;color:var(--ink-3);font-weight:normal;">v1.1.0</span></span>
+    <span class="logo-name">咪咪<em>剪辑</em> <span style="font-size:10px;color:var(--ink-3);font-weight:normal;">v1.2.0</span></span>
   </div>
   <input type="text" id="projName" value="未命名项目" title="项目名（用于导出文件命名）">
   <div class="top-sep"></div>
@@ -1934,6 +1934,426 @@ function openExportModal(){
 }
 function closeModal(){ $('#modalRoot').innerHTML = ''; }
 
+/* =========================================================
+ * 帧精确导出（WebCodecs + 自研 MP4 muxer，v1.2.0）
+ * 视频：逐帧虚拟时间 seek → drawFrame → VideoFrame → H.264 编码
+ * 音频：decodeAudioData → OfflineAudioContext 混音 → AAC 编码
+ * 封装：渐进式 MP4（ftyp + mdat + moov，moov 在尾部，本地文件无碍）
+ * 降级：VideoEncoder 不可用 / codec 不支持 → WebM 实时录制老路径
+ * ========================================================= */
+
+/* --- 最小 MP4 盒子工具 --- */
+function mp4Box(type){
+  const parts = Array.prototype.slice.call(arguments, 1).filter(p => p);   // 允许 null 子盒（如无音轨）
+  let size = 0;
+  for (const p of parts) size += p.length;
+  const out = new Uint8Array(8 + size);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, out.length);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  let off = 8;
+  for (const p of parts){ out.set(p, off); off += p.length; }
+  return out;
+}
+function mp4FullBox(type, version, flags){
+  const parts = Array.prototype.slice.call(arguments, 3);
+  const head = new Uint8Array(4);
+  head[0] = version;
+  head[1] = (flags >> 16) & 255; head[2] = (flags >> 8) & 255; head[3] = flags & 255;
+  return mp4Box.apply(null, [type, head].concat(parts));
+}
+const mp4U8 = v => new Uint8Array([v & 255]);
+const mp4U16 = v => { const u = new Uint8Array(2); new DataView(u.buffer).setUint16(0, v); return u; };
+const mp4U24 = v => { const u = new Uint8Array(3); u[0]=(v>>16)&255; u[1]=(v>>8)&255; u[2]=v&255; return u; };
+const mp4U32 = v => { const u = new Uint8Array(4); new DataView(u.buffer).setUint32(0, v >>> 0); return u; };
+const mp4Str = s => { const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; };
+const mp4Zeros = n => new Uint8Array(n);
+/* 相同 duration 的连续 sample 合并为 stts entry */
+function mp4Stts(durations, timescale){
+  const entries = [];
+  for (const d of durations){
+    if (entries.length && entries[entries.length - 1][0] === d) entries[entries.length - 1][1]++;
+    else entries.push([d, 1]);
+  }
+  const parts = [mp4U32(entries.length)];
+  for (const [d, n] of entries) parts.push(mp4U32(n), mp4U32(d));
+  return mp4FullBox('stts', 0, 0, mp4Concat(parts));
+}
+function mp4Concat(arrs){
+  let size = 0;
+  for (const a of arrs) size += a.length;
+  const out = new Uint8Array(size);
+  let off = 0;
+  for (const a of arrs){ out.set(a, off); off += a.length; }
+  return out;
+}
+
+/* 36 字节 unity 变换矩阵 */
+function mp4Matrix(){
+  return mp4Concat([
+    mp4U32(0x10000), mp4U32(0), mp4U32(0),
+    mp4U32(0), mp4U32(0x10000), mp4U32(0),
+    mp4U32(0), mp4U32(0), mp4U32(0x40000000)
+  ]);
+}
+function mp4Tkhd(trackId, durMovie, volume, widthFixed, heightFixed){
+  return mp4FullBox('tkhd', 0, 3,
+    mp4U32(0), mp4U32(0), mp4U32(trackId), mp4U32(0),
+    mp4U32(durMovie), mp4Zeros(8),
+    mp4U16(0), mp4U16(0), mp4U16(volume), mp4U16(0),
+    mp4Matrix(), mp4U32(widthFixed), mp4U32(heightFixed));
+}
+function mp4Dinf(){
+  return mp4Box('dinf', mp4FullBox('dref', 0, 0, mp4U32(1), mp4FullBox('url ', 0, 1)));
+}
+function mp4Mdia(timescale, durTs, handlerType, handlerName, minf){
+  const mdhd = mp4FullBox('mdhd', 0, 0, mp4U32(0), mp4U32(0), mp4U32(timescale), mp4U32(durTs),
+    mp4U16(0x55C4), mp4U16(0));
+  const hdlr = mp4FullBox('hdlr', 0, 0, mp4U32(0), mp4Str(handlerType), mp4Zeros(12), mp4Str(handlerName), mp4U8(0));
+  return mp4Box('mdia', mdhd, hdlr, minf);
+}
+
+function createMp4Muxer(vInfo, aInfo){
+  /* vInfo: {width,height,fps,timescale,frameDur}  aInfo: {sampleRate,channels} | null */
+  const vSamples = [];   // {data, key}
+  const aSamples = [];   // {data, durSamples}
+  let vDesc = null, aDesc = null;
+  return {
+    setVideoDesc(d){ vDesc = new Uint8Array(d); },
+    setAudioDesc(d){ aDesc = new Uint8Array(d); },
+    addVideoFrame(data, key){ vSamples.push({ data, key: !!key }); },
+    addAudioChunk(data, durSamples){ aSamples.push({ data, durSamples }); },
+    hasAudio(){ return !!(aInfo && aSamples.length); },
+    build(){
+      const movieTs = 1000;
+      /* --- mdat 数据 --- */
+      const vBytes = vSamples.reduce((s, x) => s + x.data.length, 0);
+      const aBytes = aSamples.reduce((s, x) => s + x.data.length, 0);
+      const mdatPayload = new Uint8Array(vBytes + aBytes);
+      let off = 0;
+      const vOffsets = [];
+      for (const s of vSamples){ vOffsets.push(off); mdatPayload.set(s.data, off); off += s.data.length; }
+      const aOffsets = [];
+      for (const s of aSamples){ aOffsets.push(off); mdatPayload.set(s.data, off); off += s.data.length; }
+      const ftyp = mp4Box('ftyp', mp4Str('isom'), mp4U32(0x200), mp4Str('isom'), mp4Str('iso2'), mp4Str('avc1'), mp4Str('mp4a'));
+      const mdat = mp4Box('mdat', mdatPayload);
+      const dataStart = ftyp.length + 8;   // mdat 头之后
+
+      /* --- 视频 trak --- */
+      let vTrak = null;
+      let vDurMovie = 0;
+      if (vSamples.length){
+        const vDurTs = vSamples.length * vInfo.frameDur;
+        vDurMovie = Math.round(vDurTs / vInfo.timescale * movieTs);
+        const avcC = vDesc ? mp4Box('avcC', vDesc) : mp4Box('avcC', mp4Zeros(8));
+        const avc1 = mp4Box('avc1', mp4Zeros(6), mp4U16(1), mp4Zeros(16),
+          mp4U16(vInfo.width), mp4U16(vInfo.height),
+          mp4U32(0x00480000), mp4U32(0x00480000), mp4U32(0), mp4U16(1),
+          mp4Zeros(32), mp4U16(24), mp4U16(0xFFFF), avcC);
+        const vStsd = mp4FullBox('stsd', 0, 0, mp4U32(1), avc1);
+        const vStts = mp4Stts(vSamples.map(() => vInfo.frameDur), vInfo.timescale);
+        const keyIdx = [];
+        vSamples.forEach((s, i) => { if (s.key) keyIdx.push(i + 1); });
+        const vStss = mp4FullBox('stss', 0, 0, mp4U32(keyIdx.length || 1), mp4Concat(keyIdx.map(n => mp4U32(n))));
+        const vStsc = mp4FullBox('stsc', 0, 0, mp4U32(1), mp4U32(1), mp4U32(1), mp4U32(1));
+        const vStsz = mp4FullBox('stsz', 0, 0, mp4U32(0), mp4U32(vSamples.length),
+          mp4Concat(vSamples.map(s => mp4U32(s.data.length))));
+        const vStco = mp4FullBox('stco', 0, 0, mp4U32(vOffsets.length),
+          mp4Concat(vOffsets.map(o => mp4U32(dataStart + o))));
+        const vStbl = mp4Box('stbl', vStsd, vStts, vStss, vStsc, vStsz, vStco);
+        const vMinf = mp4Box('minf',
+          mp4FullBox('vmhd', 0, 1, mp4U16(0), mp4U16(0), mp4U16(0), mp4U16(0)),
+          mp4Dinf(), vStbl);
+        const vTkhd = mp4Tkhd(1, vDurMovie, 0x0100, vInfo.width << 16, vInfo.height << 16);
+        vTrak = mp4Box('trak', vTkhd, mp4Mdia(vInfo.timescale, vDurTs, 'vide', 'VideoHandler', vMinf));
+      }
+
+      /* --- 音频 trak --- */
+      let aTrak = null;
+      let aDurMovie = 0;
+      if (this.hasAudio()){
+        const aTs = aInfo.sampleRate;
+        const aDurTs = aSamples.reduce((s, x) => s + x.durSamples, 0);
+        aDurMovie = Math.round(aDurTs / aTs * movieTs);
+        const dsi = aDesc || mp4U16(0x1210);   // AudioSpecificConfig 兜底 AAC-LC 48k stereo
+        const dcd = mp4Concat([
+          mp4U8(0x40), mp4U8(0x15 << 2 | 1), mp4U24(0),
+          mp4U32(128000), mp4U32(128000),
+          mp4U8(0x05), mp4U8(dsi.length), dsi
+        ]);
+        const esPayload = mp4Concat([
+          mp4U16(1), mp4U8(0),
+          mp4U8(0x04), mp4U8(dcd.length), dcd,
+          mp4U8(0x06), mp4U8(1), mp4U8(0x02)
+        ]);
+        const esds = mp4FullBox('esds', 0, 0, mp4Concat([mp4U8(0x03), mp4U8(esPayload.length), esPayload]));
+        const mp4a = mp4Box('mp4a', mp4Zeros(6), mp4U16(1), mp4U16(0), mp4U16(0), mp4U32(0),
+          mp4U16(aInfo.channels), mp4U16(16), mp4U16(0), mp4U16(0),
+          mp4U32(aInfo.sampleRate << 16), esds);
+        const aStsd = mp4FullBox('stsd', 0, 0, mp4U32(1), mp4a);
+        const aStts = mp4Stts(aSamples.map(s => s.durSamples), aTs);
+        const aStsc = mp4FullBox('stsc', 0, 0, mp4U32(1), mp4U32(1), mp4U32(1), mp4U32(1));
+        const aStsz = mp4FullBox('stsz', 0, 0, mp4U32(0), mp4U32(aSamples.length),
+          mp4Concat(aSamples.map(s => mp4U32(s.data.length))));
+        const aStco = mp4FullBox('stco', 0, 0, mp4U32(aOffsets.length),
+          mp4Concat(aOffsets.map(o => mp4U32(dataStart + o))));
+        const aStbl = mp4Box('stbl', aStsd, aStts, aStsc, aStsz, aStco);
+        const aMinf = mp4Box('minf',
+          mp4FullBox('smhd', 0, 0, mp4U16(0), mp4U16(0)),
+          mp4Dinf(), aStbl);
+        const aTkhd = mp4Tkhd(2, aDurMovie, 0x0100, 0, 0);
+        aTrak = mp4Box('trak', aTkhd, mp4Mdia(aTs, aDurTs, 'soun', 'SoundHandler', aMinf));
+      }
+
+      const totalDur = Math.max(vDurMovie, aDurMovie);
+      const mvhd = mp4FullBox('mvhd', 0, 0, mp4U32(0), mp4U32(0), mp4U32(movieTs), mp4U32(totalDur),
+        mp4U32(0x10000), mp4U16(0x100), mp4Zeros(10),
+        mp4Matrix(), mp4Zeros(24), mp4U32(2));
+      const moov = mp4Box('moov', mvhd, vTrak, aTrak);
+      return new Blob([ftyp, mdat, moov], { type: 'video/mp4' });
+    }
+  };
+}
+
+/* --- 帧精确导出实现 --- */
+let frameCancel = false;
+async function pickExportMode(){
+  if (!window.VideoEncoder || !window.VideoFrame || !window.VideoEncoder.isConfigSupported) return 'webm';
+  for (const codec of ['avc1.640028', 'avc1.4d0028', 'avc1.42001f']){
+    try {
+      const s = await VideoEncoder.isConfigSupported({ codec, width: CW, height: CH, bitrate: 8000000, framerate: 30 });
+      if (s.supported) return 'mp4';
+    } catch(e){}
+  }
+  return 'webm';
+}
+function audioSourceClips(){
+  const out = [];
+  for (const t of ['audio','video']){
+    if (trackHidden(t)) continue;
+    for (const c of state.tracks[t]){
+      if (c.type === 'audio' || c.type === 'video') out.push(c);
+    }
+  }
+  return out;
+}
+/* 素材音频解码（AudioBuffer 缓存 promise，防重复解码） */
+function audioBufferOf(asset){
+  if (!asset) return null;
+  if (asset._abPromise) return asset._abPromise;
+  if (!asset.file || !window.AudioContext){ asset._abPromise = Promise.resolve(null); return asset._abPromise; }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ac = new AC();
+  asset._abPromise = asset.file.arrayBuffer()
+    .then(ab => ac.decodeAudioData(ab))
+    .then(buf => { asset.audioBuffer = buf; try { ac.close(); } catch(e){} return buf; })
+    .catch(() => { try { ac.close(); } catch(e){} return null; });
+  return asset._abPromise;
+}
+function seekEl(el, t){
+  return new Promise(resolve => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      el.removeEventListener('seeked', finish);
+      resolve();
+    };
+    el.addEventListener('seeked', finish);
+    try { el.currentTime = t; } catch(e){ finish(); return; }
+    setTimeout(finish, 1500);
+  });
+}
+function waitForReady(el){
+  if (el.readyState >= 2) return Promise.resolve();
+  return new Promise(resolve => {
+    let done = false;
+    const finish = () => { if (done) return; done = true; el.removeEventListener('loadeddata', finish); resolve(); };
+    el.addEventListener('loadeddata', finish);
+    setTimeout(finish, 10000);
+  });
+}
+/* 返回 {blob}，失败 throw */
+async function exportMp4Blob(onProgress){
+  const fps = 30;
+  const totalFrames = Math.max(1, Math.ceil(state.duration * fps));
+  /* 1) 选 codec */
+  let codec = null;
+  for (const cd of ['avc1.640028', 'avc1.4d0028', 'avc1.42001f']){
+    try {
+      const s = await VideoEncoder.isConfigSupported({ codec: cd, width: CW, height: CH, bitrate: 8000000, framerate: fps });
+      if (s.supported){ codec = cd; break; }
+    } catch(e){}
+  }
+  if (!codec) throw new Error('no-supported-codec');
+  const hasAAC = !!(window.AudioEncoder && window.AudioData);
+  /* 2) 混音（OfflineAudioContext）→ AAC */
+  const muxer = createMp4Muxer(
+    { width: CW, height: CH, fps, timescale: 90000, frameDur: 3000 },
+    hasAAC ? { sampleRate: 48000, channels: 2 } : null);
+  const sources = audioSourceClips();
+  if (sources.length && hasAAC){
+    try {
+      await encodeAudioTrack(sources, muxer, onProgress);
+    } catch(e){ /* 音频编码失败 → 出无声 MP4 */ }
+  }
+  /* 3) 逐帧 seek + 绘制 + 编码 */
+  const savedTime = state.time;
+  setPlaying(false);
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => {
+      if (meta && meta.decoderConfig && meta.decoderConfig.description){
+        muxer.setVideoDesc(meta.decoderConfig.description);
+      }
+      const d = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(d);
+      muxer.addVideoFrame(d, chunk.type === 'key');
+    },
+    error: e => {}
+  });
+  encoder.configure({ codec, width: CW, height: CH, bitrate: 8000000, framerate: fps, avc: { format: 'avc' } });
+  for (let f = 0; f < totalFrames; f++){
+    if (frameCancel) { try { encoder.close(); } catch(e){} throw new Error('cancelled'); }
+    const t = f / fps;
+    for (const c of state.tracks.video){
+      if (c.type !== 'video' || trackHidden('video')) continue;
+      if (t < c.start || t >= clipEnd(c)) continue;
+      const el = mediaEl(c);
+      if (!el) continue;
+      await waitForReady(el);
+      const target = (c.in || 0) + (t - c.start) * (c.speed || 1);
+      if (Math.abs(el.currentTime - target) > 0.001) await seekEl(el, target);
+    }
+    state.time = t;
+    drawFrame();
+    const frame = new VideoFrame(cv, { timestamp: Math.round(f * 1e6 / fps), duration: Math.round(1e6 / fps) });
+    encoder.encode(frame, { keyFrame: f % (fps * 2) === 0 });
+    frame.close();
+    if (onProgress) onProgress(f + 1, totalFrames);
+  }
+  await encoder.flush();
+  state.time = savedTime;
+  seek(savedTime);
+  /* 4) 封装 */
+  return { blob: muxer.build(), ext: 'mp4' };
+}
+async function encodeAudioTrack(clips, muxer, onProgress){
+  const SR = 48000;
+  /* 解码所有素材音频 */
+  const decoded = await Promise.all(clips.map(c => audioBufferOf(assetOf(c))));
+  const hasAny = decoded.some(b => b);
+  if (!hasAny) return;
+  const oac = new OfflineAudioContext(2, Math.max(1, Math.ceil(state.duration * SR)), SR);
+  clips.forEach((c, i) => {
+    const buf = decoded[i];
+    if (!buf) return;
+    const src = oac.createBufferSource();
+    src.buffer = buf;
+    src.playbackRate.value = c.speed || 1;
+    const g = oac.createGain();
+    const vol = c.muted ? 0 : clamp(c.volume, 0, 1);
+    g.gain.value = vol;
+    if (c.fadeIn > 0){
+      g.gain.setValueAtTime(0, c.start);
+      g.gain.linearRampToValueAtTime(vol, c.start + c.fadeIn);
+    }
+    if (c.fadeOut > 0){
+      g.gain.setValueAtTime(vol, Math.max(c.start, clipEnd(c) - c.fadeOut));
+      g.gain.linearRampToValueAtTime(0, clipEnd(c));
+    }
+    src.connect(g);
+    g.connect(oac.destination);
+    const offset = clamp(c.in || 0, 0, buf.duration);
+    const playSrc = c.dur * (c.speed || 1);
+    src.start(c.start, offset, clamp(playSrc, 0, Math.max(0, buf.duration - offset)));
+  });
+  const rendered = await oac.startRendering();
+  let aDesc = null;
+  const enc = new AudioEncoder({
+    output: (chunk, meta) => {
+      if (meta && meta.decoderConfig && meta.decoderConfig.description){
+        aDesc = new Uint8Array(meta.decoderConfig.description);
+      }
+      const d = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(d);
+      muxer.addAudioChunk(d, Math.max(1, Math.round(chunk.duration * 48 / 1000)));
+    },
+    error: () => {}
+  });
+  enc.configure({ codec: 'mp4a.40.2', sampleRate: SR, numberOfChannels: 2, bitrate: 128000 });
+  const l = rendered.getChannelData(0);
+  const r = rendered.numberOfChannels > 1 ? rendered.getChannelData(1) : l;
+  const CHUNK = 10240;
+  for (let off = 0; off < rendered.length; off += CHUNK){
+    const n = Math.min(CHUNK, rendered.length - off);
+    const data = new Float32Array(n * 2);
+    data.set(l.subarray(off, off + n), 0);
+    data.set(r.subarray(off, off + n), n);
+    const ad = new AudioData({
+      format: 'f32-planar', sampleRate: SR, numberOfFrames: n,
+      numberOfChannels: 2, timestamp: Math.round(off / SR * 1e6), data
+    });
+    enc.encode(ad);
+    ad.close();
+  }
+  await enc.flush();
+  muxer.setAudioDesc(aDesc);
+}
+async function startFrameExport(){
+  if (exporting) return;
+  exporting = true;
+  frameCancel = false;
+  const name = $('#projName').value.trim() || 'online-video';
+  openFrameProgress();
+  try {
+    const result = await exportMp4Blob((f, total) => updateFrameProgress(f, total));
+    if (frameCancel){ closeModal(); toast('已取消导出'); return; }
+    download(name + '.mp4', result.blob);
+    closeModal();
+    toast('导出完成：' + name + '.mp4（' + (result.blob.size / 1048576).toFixed(1) + ' MB）', 4000);
+  } catch(e){
+    closeModal();
+    if (e && e.message === 'cancelled') toast('已取消导出');
+    else {
+      toast('MP4 导出失败（' + (e.message || e) + '），已改用 WebM 模式');
+      startExport();
+    }
+  }
+  exporting = false;
+}
+function openFrameProgress(){
+  $('#modalRoot').innerHTML =
+    '<div class="modal-mask"><div class="modal"><h3>🎬 正在导出 MP4（帧精确）</h3>' +
+    '<div class="m-body">WebCodecs 逐帧编码，速度远超实时且可保持后台。<br>期间请勿编辑时间轴。</div>' +
+    '<div class="progress-outer"><div class="progress-inner" id="exportProgress"></div></div>' +
+    '<div class="progress-label" id="frameLabel">准备中…</div>' +
+    '<div class="m-btns" style="margin-top:14px;"><button id="btnCancelFrame">取消</button></div>' +
+    '</div></div>';
+  $('#btnCancelFrame').addEventListener('click', () => { frameCancel = true; });
+}
+function updateFrameProgress(f, total){
+  const el = $('#exportProgress');
+  if (!el) return;
+  el.style.width = (f / total * 100) + '%';
+  $('#frameLabel').textContent = '编码帧 ' + f + ' / ' + total + '（' + Math.round(f / total * 100) + '%）';
+}
+function openExportChoice(){
+  if (exporting) return;
+  if (!allClips().length){ toast('时间轴还是空的，先添加素材吧'); return; }
+  pickExportMode().then(mode => {
+    $('#modalRoot').innerHTML =
+      '<div class="modal-mask"><div class="modal"><h3>🎬 选择导出格式</h3>' +
+      '<div class="m-body" style="margin-bottom:10px;">' +
+      '<b style="color:var(--ink);">MP4（H.264 + AAC）</b> —— 帧精确逐帧编码，速度远超实时，推荐<br>' +
+      '<b style="color:var(--ink);">WebM（VP8/9 + Opus）</b> —— 浏览器实时录制，兼容模式</div>' +
+      '<div class="m-btns"><button id="btnExportWebm">导出 WebM</button>' +
+      '<button id="btnExportMp4" class="primary"' + (mode === 'mp4' ? '' : ' disabled title="当前浏览器不支持 WebCodecs"') + '>导出 MP4</button></div>' +
+      '</div></div>';
+    $('#btnExportWebm').addEventListener('click', () => { closeModal(); startExport(); });
+    $('#btnExportMp4').addEventListener('click', () => { closeModal(); startFrameExport(); });
+  });
+}
+
 /* ---------- 工程保存 / 载入 ---------- */
 function saveProject(){
   const data = {
@@ -2087,7 +2507,7 @@ $('#projInput').addEventListener('change', e => {
 });
 $('#btnUndo').addEventListener('click', undo);
 $('#btnRedo').addEventListener('click', redo);
-$('#btnExport').addEventListener('click', startExport);
+$('#btnExport').addEventListener('click', openExportChoice);
 $('#btnPlay').addEventListener('click', togglePlay);
 $('#btnToStart').addEventListener('click', () => seek(0));
 $('#btnToEnd').addEventListener('click', () => seek(state.duration));
@@ -2175,6 +2595,7 @@ window.__ov = {
   toggleSelection, allSelected, deleteSelected, duplicateSelected,
   toggleTrack, renderTrackHeads,
   performAutosave, loadAutosave, restoreAutosave, discardAutosave, buildAutosavePayload,
+  pickExportMode, exportMp4Blob, openExportChoice, mp4Concat,
   cv, ctx,
   snapTo: t => { state.time = t; $('#playhead').style.left = (t * state.pxPerSec) + 'px'; }
 };

@@ -4,24 +4,29 @@
 
 **线上**：Cloudflare Pages（部署由领主手动执行，咪咪只 commit + push）
 
-## 功能（v1.1.0）
+## 功能（v1.2.0）
 
+- **导出（v1.2.0 重构）**：
+  - **MP4 帧精确导出**（推荐）：WebCodecs VideoEncoder 逐帧 H.264 编码，速度远超实时、帧帧精确、可保持后台
+  - 音频：decodeAudioData → OfflineAudioContext 混音（音量/静音/变速/淡入淡出全部还原）→ AudioEncoder AAC
+  - **自研最小 MP4 muxer**（ftyp+mdat+moov，avcC/esds 手写盒，约 200 行，保持零依赖）
+  - WebM 实时录制保留为兼容模式；VideoEncoder 不可用 / codec 全不支持时自动降级
 - **基础剪辑**：视频/图片/音频导入，时间轴拖拽排序、边缘裁剪、播放头分割、删除、吸附
-- **体验补强（v1.1.0 新增）**：
+- **体验补强（v1.1.0）**：
   - IndexedDB 自动保存（含媒体文件本体），刷新/崩溃后一键恢复，防抖 1.5s + 页面卸载前兜底
-  - 波纹删除（Shift+Del，删除后自动缝合空隙）、Shift+点击多选、轨道锁定/隐藏、Ctrl+D 复制片段
+  - 波纹删除（Shift+Del）、Shift+点击多选、轨道锁定/隐藏、Ctrl+D 复制片段
   - 视频片段胶片条缩略图（均匀抽 6 帧）、音频波形（decodeAudioData 400 峰值桶）
 - **滤镜与调色**：8 种滤镜预设 + 亮度/对比度/饱和度，片段淡入淡出
 - **文字与字幕**：任意时段叠加文字，字体/颜色/描边底/画布上直接拖拽定位
 - **音频与变速**：独立音频轨、每片段音量/静音、视频 0.5x~4x 变速
-- **导出**：Canvas 实时合成 + MediaRecorder 录制，导出 WebM（含音频）
-- **其他**：撤销/重做（Ctrl+Z / Ctrl+Y）、时间轴缩放（Ctrl+滚轮）、工程保存/载入（.ovproj，媒体按文件名重新关联）
+- **其他**：撤销/重做（Ctrl+Z / Ctrl+Y）、时间轴缩放（Ctrl+滚轮）、工程保存/载入（.ovproj）
 
 ## 技术
 
 - 1280×720 Canvas 逐帧合成（`ctx.filter` 滤镜、cover 适配、文字绘制）
 - 每个片段独立媒体元素（video/audio），支持同素材多片段独立 seek/变速/音量
-- 导出：`canvas.captureStream(30)` + AudioContext `MediaStreamDestination` 混音 → MediaRecorder
+- MP4 导出管线：逐帧 seek→合成→`new VideoFrame(canvas)`→VideoEncoder(H.264)；OfflineAudioContext 混音→AudioEncoder(AAC)；渐进式 MP4 封装
+- WebM 导出：`canvas.captureStream(30)` + AudioContext `MediaStreamDestination` 混音 → MediaRecorder
 - 自动保存：IndexedDB 两个 store（media 存 File Blob / state 存时间轴快照），只写未存过的媒体避免重复 IO
 - 珊瑚橙主题，与 online-tools / online-ps 同一视觉体系
 

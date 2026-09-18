@@ -279,6 +279,8 @@ async function run(){
   exClip.fadeIn = 0; exClip.fadeOut = 0;
   OV.recalcDuration();
   document.getElementById('btnExport').click();
+  await until(() => document.getElementById('btnExportWebm'), 5000);   // v1.2.0：先弹格式选择
+  document.getElementById('btnExportWebm').click();
   const done = await until(() => document.getElementById('toast') &&
       document.getElementById('toast').textContent.includes('导出完成'), 30000, 250);
   log('T13 导出 WebM 冒烟测试', done, done ? '' : '30s 内未收到导出完成回调');
@@ -375,6 +377,75 @@ async function run(){
   log('T18 自动保存快照（含媒体）', !!savedOk, savedOk ? 'assets=' + payload.assets.length : '无存档');
   log('T18b 清空后从存档恢复', restoredOk && drewAfterRestore,
       'restored=' + restoredOk + ' rgb=' + drewRgb.join(',') + ' time=' + OV.state.time);
+
+  /* ===== v1.2.0 新增 ===== */
+
+  /* T19 导出模式检测（WebCodecs 可用性） */
+  const mode = await OV.pickExportMode();
+  log('T19 导出模式检测', mode === 'mp4' || mode === 'webm', 'mode=' + mode);
+
+  /* T20 MP4 帧精确导出端到端：导出 → ftyp 头 → 浏览器回代解析（时长/分辨率/画面） */
+  for (const c of [...OV.state.tracks.video]) OV.removeClip('video', c.id);
+  const mClip = OV.addClipFromAsset(imgAsset.id, 0); mClip.dur = 0.5;
+  mClip.fadeIn = 0; mClip.fadeOut = 0;
+  OV.recalcDuration();
+  if (mode === 'mp4'){
+    let res = null, expErr = '';
+    try { res = await OV.exportMp4Blob(() => {}); } catch(e){ expErr = e.message || String(e); }
+    if (!res){ log('T20 MP4 导出（ftyp 头 + 体积）', false, '导出异常: ' + expErr); }
+    else {
+    const head = new Uint8Array(await res.blob.slice(0, 12).arrayBuffer());
+    const ftypOk = head[4] === 0x66 && head[5] === 0x74 && head[6] === 0x79 && head[7] === 0x70; // 'ftyp'
+    log('T20 MP4 导出（ftyp 头 + 体积）', res.blob.size > 2048 && ftypOk, 'size=' + res.blob.size);
+    const mp4Url = URL.createObjectURL(res.blob);
+    const mp4v = document.createElement('video');
+    mp4v.muted = true;
+    mp4v.src = mp4Url;
+    const metaOk = await until(() => mp4v.readyState >= 1 && mp4v.videoWidth === 1280, 8000);
+    const durOk = metaOk && Math.abs(mp4v.duration - 1.0) < 0.15;
+    let pixOk = false;
+    if (metaOk){
+      await new Promise(res2 => {
+        mp4v.addEventListener('seeked', res2, { once: true });
+        mp4v.currentTime = 0.25;
+        setTimeout(res2, 3000);
+      });
+      await sleep(150);
+      const tc = document.createElement('canvas');
+      tc.width = 1280; tc.height = 720;
+      const tg = tc.getContext('2d');
+      tg.drawImage(mp4v, 0, 0);
+      const d = tg.getImageData(640, 180, 1, 1).data;
+      pixOk = d[0] > 150 && d[1] < 90 && d[2] < 90;   // 图片上半红色
+    }
+    log('T20b 浏览器解析 MP4（时长/分辨率/画面像素）', metaOk && durOk && pixOk,
+        'dur=' + mp4v.duration + ' w=' + mp4v.videoWidth + ' pix=' + pixOk);
+
+    /* T20c 含 AAC 音轨的 MP4（OfflineAudioContext 混音 + AudioEncoder） */
+    const audioAsset = OV.state.assets.find(a => a.type === 'audio');
+    if (audioAsset){
+      OV.addClipFromAsset(audioAsset.id, 0);
+      OV.recalcDuration();
+      let res2 = null, err2 = '';
+      try { res2 = await OV.exportMp4Blob(() => {}); } catch(e){ err2 = e.message || String(e); }
+      let parseOk = false, dur2 = 0;
+      if (res2){
+        const u2 = URL.createObjectURL(res2.blob);
+        const v2 = document.createElement('video');
+        v2.muted = true;
+        v2.src = u2;
+        const ok2 = await until(() => v2.readyState >= 1 && v2.videoWidth === 1280, 8000);
+        dur2 = v2.duration;
+        parseOk = ok2 && Math.abs(dur2 - 1.0) < 0.15;
+      }
+      log('T20c 含 AAC 音轨的 MP4 导出与解析', !!res2 && parseOk,
+          'size=' + (res2 ? res2.blob.size : 0) + ' dur=' + dur2 + (err2 ? ' err=' + err2 : ''));
+    }
+    }
+  } else {
+    log('T20 MP4 导出（ftyp 头 + 体积）', true, '环境不支持 WebCodecs，WebM 兜底生效（跳过）');
+    log('T20b 浏览器解析 MP4（时长/分辨率/画面像素）', true, '跳过');
+  }
 
   finish();
 }

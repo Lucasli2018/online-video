@@ -66,12 +66,18 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await send('Page.enable');
   await send('Runtime.enable');
 
-  // 轮询等待探针完成
+  // 轮询等待探针完成（实时打印进度行）
   const t0 = Date.now();
   let done = false;
+  let printed = 0;
   while (Date.now() - t0 < MAX_WAIT_MS){
     await sleep(1000);
     try {
+      const rows = await evaluate("Array.from(document.querySelectorAll('.probe-pass,.probe-fail')).map(x => x.textContent)");
+      if (rows && rows.length > printed){
+        for (let i = printed; i < rows.length; i++) console.log('  … ' + rows[i]);
+        printed = rows.length;
+      }
       done = await evaluate("document.body.getAttribute('data-probe-done')==='1'");
       if (done) break;
     } catch(e){}
