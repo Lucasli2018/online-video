@@ -47,16 +47,18 @@ function rectCenter(el, fx, fy){
   const r = el.getBoundingClientRect();
   return { x: r.left + r.width * (fx === undefined ? .5 : fx), y: r.top + r.height * (fy === undefined ? .5 : fy) };
 }
-function fireMouse(el, type, x, y){
-  el.dispatchEvent(new MouseEvent(type, {
+function fireMouse(el, type, x, y, opts){
+  const init = {
     bubbles: true, cancelable: true, view: window,
     clientX: x, clientY: y, button: 0
-  }));
+  };
+  if (opts) Object.assign(init, opts);
+  el.dispatchEvent(new MouseEvent(type, init));
 }
-function dragPath(fromEl, fx1, fy1, toEl, fx2, fy2, steps){
+function dragPath(fromEl, fx1, fy1, toEl, fx2, fy2, steps, opts){
   const a = rectCenter(fromEl, fx1, fy1);
   const b = toEl ? rectCenter(toEl, fx2, fy2) : { x: a.x + fx2, y: a.y + fy2 };
-  fireMouse(fromEl, 'mousedown', a.x, a.y);
+  fireMouse(fromEl, 'mousedown', a.x, a.y, opts);
   for (let i = 1; i <= (steps || 6); i++){
     const x = a.x + (b.x - a.x) * i / (steps || 6);
     const y = a.y + (b.y - a.y) * i / (steps || 6);
@@ -280,6 +282,99 @@ async function run(){
   const done = await until(() => document.getElementById('toast') &&
       document.getElementById('toast').textContent.includes('导出完成'), 30000, 250);
   log('T13 导出 WebM 冒烟测试', done, done ? '' : '30s 内未收到导出完成回调');
+
+  /* ===== v1.1.0 新增 ===== */
+
+  /* T14 波纹删除：A(0-2) + B(2-4)，波纹删 A → B 左移到 0 */
+  for (const c of [...OV.state.tracks.video]) OV.removeClip('video', c.id);
+  const imgAsset = OV.state.assets.find(a => a.type === 'image');
+  const cA = OV.addClipFromAsset(imgAsset.id, 0); cA.dur = 2; cA.fadeIn = 0; cA.fadeOut = 0;
+  const cB = OV.addClipFromAsset(imgAsset.id, 2); cB.dur = 2; cB.fadeIn = 0; cB.fadeOut = 0;
+  OV.recalcDuration();
+  OV.selectClip('video', cA.id);
+  OV.deleteSelected(true);
+  await sleep(200);
+  log('T14 波纹删除缝合空隙', !OV.state.tracks.video.some(c => c.id === cA.id) &&
+      near(cB.start, 0, .01), 'B.start=' + cB.start);
+
+  /* T15 多选删除：Shift+点击真实事件选中 B 和 C，一起删
+   * 注意：selectClip 会触发 renderClips 重建 DOM，每次点击前必须重新查询元素 */
+  const cC = OV.addClipFromAsset(imgAsset.id, 2); cC.dur = 2; cC.fadeIn = 0; cC.fadeOut = 0;
+  OV.recalcDuration();
+  const elB = document.querySelectorAll('#lane-video .clip')[0];
+  fireMouse(elB, 'mousedown', rectCenter(elB).x, rectCenter(elB).y);
+  fireMouse(window, 'mouseup', rectCenter(elB).x, rectCenter(elB).y);
+  await sleep(80);
+  const elC2 = document.querySelectorAll('#lane-video .clip')[1];   // 重新查询（DOM 已重建）
+  fireMouse(elC2, 'mousedown', rectCenter(elC2).x, rectCenter(elC2).y, { shiftKey: true });
+  fireMouse(window, 'mouseup', rectCenter(elC2).x, rectCenter(elC2).y);
+  await sleep(80);
+  const multiOk = OV.allSelected().length === 2;
+  const dbgMulti = 'B=' + cB.id + ' C=' + cC.id + ' sel=' + (OV.getSel() ? OV.getSel().id : 'null') +
+    ' multi=[' + OV.state.multi.join(',') + ']';
+  OV.deleteSelected(false);
+  await sleep(150);
+  log('T15 多选（Shift+点击）并批量删除', multiOk && OV.state.tracks.video.length === 0,
+      dbgMulti + ' | left=' + OV.state.tracks.video.length);
+
+  /* T16 Ctrl+D 复制片段 */
+  const cD = OV.addClipFromAsset(imgAsset.id, 0); cD.dur = 2; cD.fadeIn = 0; cD.fadeOut = 0;
+  OV.recalcDuration();
+  OV.selectClip('video', cD.id);
+  const cntBefore = OV.state.tracks.video.length;
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', ctrlKey: true, bubbles: true }));
+  await sleep(200);
+  const dups = OV.state.tracks.video.filter(c => c !== cD && near(c.dur, 2) && c.start >= cD.start + cD.dur - 0.01);
+  log('T16 Ctrl+D 复制片段', OV.state.tracks.video.length === cntBefore + 1 && dups.length >= 1,
+      'count ' + cntBefore + '→' + OV.state.tracks.video.length + ' copy.start=' + (dups[0] ? dups[0].start : '?'));
+
+  /* T17 轨道锁定 / 隐藏 */
+  OV.toggleTrack('video', 'lock');
+  const lockBtn = document.querySelector('.th-btn[data-t="video"][data-act="lock"]');
+  const lockUi = !!lockBtn && lockBtn.classList.contains('on');
+  OV.selectClip('video', cD.id);
+  const beforeLockDel = OV.state.tracks.video.length;
+  OV.deleteSelected(false);
+  const lockProtect = OV.state.tracks.video.length === beforeLockDel;
+  OV.toggleTrack('video', 'lock');
+  OV.toggleTrack('video', 'hidden');
+  OV.snapTo(0.5);
+  await sleep(300);
+  const hiddenBlack = isBlack(px(640, 360));
+  OV.toggleTrack('video', 'hidden');
+  OV.drawFrame();
+  const manualRgb = px(640, 360);
+  await sleep(200);
+  const backRgb = px(640, 360);
+  const shownBack = !isBlack(backRgb);
+  const clipDbg = OV.state.tracks.video.map(c => c.start + '-' + (c.start + c.dur)).join(',');
+  log('T17 锁定轨道防误删', lockUi && lockProtect, 'ui=' + lockUi + ' protect=' + lockProtect);
+  log('T17b 隐藏轨道后画面跳过（黑屏）且恢复', hiddenBlack && shownBack,
+      'hidden=' + hiddenBlack + ' restored=' + shownBack + ' manual=' + manualRgb.join(',') +
+      ' clips=[' + clipDbg + '] hidden=' + OV.state.trackCfg.video.hidden);
+
+  /* T18 自动保存 + 恢复（IndexedDB 含媒体文件） */
+  OV.selectClip('video', OV.state.tracks.video[0].id);
+  await OV.performAutosave();
+  const payload = await OV.loadAutosave();
+  const savedOk = payload && payload.tracks && payload.tracks.video.length >= 1 && payload.assets.length >= 1;
+  // 清空时间轴（保留素材），再从存档恢复
+  const videoCountBefore = payload ? payload.tracks.video.length : 0;
+  for (const c of [...OV.state.tracks.video]) OV.removeClip('video', c.id);
+  for (const c of [...OV.state.tracks.text]) OV.removeClip('text', c.id);
+  for (const c of [...OV.state.tracks.audio]) OV.removeClip('audio', c.id);
+  const emptied = OV.state.tracks.video.length === 0;
+  let restored = false;
+  if (savedOk) restored = await OV.restoreAutosave(payload);
+  await sleep(300);
+  const restoredOk = restored && OV.state.tracks.video.length === videoCountBefore &&
+      OV.state.assets.every(a => !!a.url);
+  OV.snapTo(0.5);
+  const drewRgb = px(640, 360);
+  const drewAfterRestore = !isBlack(drewRgb);
+  log('T18 自动保存快照（含媒体）', !!savedOk, savedOk ? 'assets=' + payload.assets.length : '无存档');
+  log('T18b 清空后从存档恢复', restoredOk && drewAfterRestore,
+      'restored=' + restoredOk + ' rgb=' + drewRgb.join(',') + ' time=' + OV.state.time);
 
   finish();
 }

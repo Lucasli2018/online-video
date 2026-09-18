@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>咪咪剪辑 · online-video</title>
+<title>咪咪剪辑 · online-video v1.1.0</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <style>
 :root{
@@ -251,6 +251,27 @@ body.trimming,body.trimming *{cursor:ew-resize !important;}
 .progress-inner{height:100%;background:linear-gradient(90deg,var(--primary),var(--primary-deep));width:0%;transition:width .2s;border-radius:6px;}
 .progress-label{font-size:11px;color:var(--ink-2);text-align:center;font-variant-numeric:tabular-nums;}
 
+/* ===== v1.1.0 新增 ===== */
+#saveState{font-size:11px;color:var(--ink-3);margin-right:6px;white-space:nowrap;}
+#saveState.saving{color:var(--primary);}
+.tl-head{position:relative;}
+.tl-head .head-title{display:block;font-weight:bold;font-size:12px;}
+.tl-head .sub{display:block;font-size:9px;font-weight:normal;color:var(--ink-3);}
+.th-btns{position:absolute;right:5px;top:5px;display:flex;flex-direction:column;gap:3px;}
+.th-btn{
+  width:20px;height:18px;border-radius:5px;border:1px solid var(--line);
+  background:#fff;font-size:10px;line-height:1;padding:0;cursor:pointer;color:var(--ink-2);
+}
+.th-btn:hover{border-color:var(--primary);color:var(--primary);}
+.th-btn.on{background:var(--primary);border-color:var(--primary);color:#fff;}
+.tl-head.head-hidden{opacity:.55;}
+.tl-lane.lane-hidden{opacity:.4;}
+.tl-lane.lane-locked{background:repeating-linear-gradient(45deg,#F3EFEA 0 8px,#EFEAE4 8px 16px);}
+.tl-lane.lane-locked .clip{pointer-events:none;}
+.filmstrip-c{position:absolute;inset:0;display:flex;overflow:hidden;pointer-events:none;}
+.filmstrip-c img{width:54px;height:100%;object-fit:cover;flex:none;opacity:.85;}
+.clip .wave-c{position:absolute;left:0;bottom:0;pointer-events:none;}
+
 /* 滚动条 */
 ::-webkit-scrollbar{width:8px;height:9px;}
 ::-webkit-scrollbar-thumb{background:#D8D2CA;border-radius:5px;}
@@ -270,7 +291,7 @@ body.trimming,body.trimming *{cursor:ew-resize !important;}
 <header id="topbar">
   <div class="logo">
     <svg width="26" height="26" viewBox="0 0 26 26"><rect x="1" y="1" width="24" height="24" rx="7" fill="url(#lg)"/><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FF6B47"/><stop offset="1" stop-color="#E5502E"/></linearGradient></defs><path d="M8.5 8 L19 13 L8.5 18 Z" fill="#fff"/><rect x="17" y="6.5" width="2.4" height="13" rx="1.2" fill="#fff" opacity=".85" transform="rotate(24 18 13)"/></svg>
-    <span class="logo-name">咪咪<em>剪辑</em></span>
+    <span class="logo-name">咪咪<em>剪辑</em> <span style="font-size:10px;color:var(--ink-3);font-weight:normal;">v1.1.0</span></span>
   </div>
   <input type="text" id="projName" value="未命名项目" title="项目名（用于导出文件命名）">
   <div class="top-sep"></div>
@@ -281,6 +302,7 @@ body.trimming,body.trimming *{cursor:ew-resize !important;}
   <button id="btnSaveProj">💾 保存工程</button>
   <button id="btnLoadProj">📁 载入工程</button>
   <div class="grow"></div>
+  <span id="saveState">自动保存就绪</span>
   <button id="btnExport" class="primary">🎬 导出视频</button>
   <input type="file" id="fileInput" multiple accept="video/*,image/*,audio/*" hidden>
   <input type="file" id="projInput" accept=".ovproj,.json" hidden>
@@ -323,6 +345,8 @@ body.trimming,body.trimming *{cursor:ew-resize !important;}
   <div id="tlToolbar">
     <button id="btnSplit">✂ 分割 <span style="color:var(--ink-3)">S</span></button>
     <button id="btnDeleteClip">🗑 删除 <span style="color:var(--ink-3)">Del</span></button>
+    <button id="btnRipple">⚡ 波纹删除 <span style="color:var(--ink-3)">Shift+Del</span></button>
+    <button id="btnDup">⧉ 复制 <span style="color:var(--ink-3)">Ctrl+D</span></button>
     <div class="sep"></div>
     <button id="btnAddText">＋ 文字 <span style="color:var(--ink-3)">T</span></button>
     <button id="btnSplitAll">按播放头全分割</button>
@@ -402,9 +426,15 @@ const MIN_DUR = 0.2;
 
 /* ---------- 状态 ---------- */
 const state = {
-  assets: [],                 // {id,type:'video|image|audio',name,url,duration,width,height,thumb}
+  assets: [],                 // {id,type:'video|image|audio',name,url,duration,width,height,thumb,file,filmstrip,peaks}
   tracks: { video: [], text: [], audio: [] },  // clip 数组，按 start 排序
-  selection: null,            // {track, id}
+  selection: null,            // {track, id} 主选中
+  multi: [],                  // 多选附加 id（与主选中同轨）
+  trackCfg: {                 // 轨道锁定/隐藏
+    video: { locked: false, hidden: false },
+    text:  { locked: false, hidden: false },
+    audio: { locked: false, hidden: false }
+  },
   time: 0,
   playing: false,
   duration: 5,                // 时间轴总时长（动态计算）
@@ -442,6 +472,7 @@ function pushHistory(){
   if (history.length > 60) history.shift();
   future = [];
   updateToolbar();
+  scheduleAutosave();
 }
 function applySnapshot(json){
   const parsed = JSON.parse(json);
@@ -449,6 +480,7 @@ function applySnapshot(json){
     state.tracks[t] = parsed[t] || [];
   }
   if (state.selection && !getSel()) state.selection = null;
+  state.multi = state.multi.filter(id => getClip(id));
   recalcDuration();
   renderTimeline();
   buildProps();
@@ -466,12 +498,187 @@ function redo(){
   toast('已重做');
 }
 
+/* ---------- 自动保存（IndexedDB，含媒体文件） ---------- */
+const AS = { db: null, enabled: true, timer: null, saving: false };
+function idbOpen(){
+  return new Promise((resolve, reject) => {
+    if (AS.db) { resolve(AS.db); return; }
+    let rq;
+    try { rq = indexedDB.open('online-video', 1); }
+    catch(e){ AS.enabled = false; reject(e); return; }
+    rq.onupgradeneeded = e => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('media')) db.createObjectStore('media');
+      if (!db.objectStoreNames.contains('state')) db.createObjectStore('state');
+    };
+    rq.onsuccess = () => { AS.db = rq.result; resolve(AS.db); };
+    rq.onerror = () => { AS.enabled = false; reject(rq.error); };
+  });
+}
+function idbPut(store, key, val){
+  return idbOpen().then(db => new Promise((res, rej) => {
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).put(val, key);
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  }));
+}
+function idbGet(store, key){
+  return idbOpen().then(db => new Promise((res, rej) => {
+    const rq = db.transaction(store, 'readonly').objectStore(store).get(key);
+    rq.onsuccess = () => res(rq.result);
+    rq.onerror = () => rej(rq.error);
+  }));
+}
+function idbDel(store, key){
+  return idbOpen().then(db => new Promise((res, rej) => {
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).delete(key);
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  }));
+}
+function idbClear(store){
+  return idbOpen().then(db => new Promise((res, rej) => {
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).clear();
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+  }));
+}
+function idbAllEntries(store){
+  return idbOpen().then(db => new Promise((res, rej) => {
+    const out = [];
+    const rq = db.transaction(store, 'readonly').objectStore(store).openCursor();
+    rq.onsuccess = () => {
+      const cur = rq.result;
+      if (cur){ out.push({ key: cur.key, val: cur.value }); cur.continue(); }
+      else res(out);
+    };
+    rq.onerror = () => rej(rq.error);
+  }));
+}
+function setSaveState(txt, saving){
+  const el = $('#saveState');
+  if (el){ el.textContent = txt; el.classList.toggle('saving', !!saving); }
+}
+function scheduleAutosave(){
+  if (!AS.enabled || exporting) return;
+  clearTimeout(AS.timer);
+  setSaveState('● 保存中…', true);
+  AS.timer = setTimeout(performAutosave, 1500);
+}
+function buildAutosavePayload(){
+  return {
+    v: 2,
+    name: $('#projName').value.trim() || '未命名项目',
+    time: state.time,
+    savedAt: Date.now(),
+    trackCfg: JSON.parse(JSON.stringify(state.trackCfg)),
+    pxPerSec: state.pxPerSec,
+    assets: state.assets.map(a => ({ id: a.id, type: a.type, name: a.name, duration: a.duration, width: a.width, height: a.height })),
+    tracks: JSON.parse(serializeTracks())
+  };
+}
+async function performAutosave(){
+  if (!AS.enabled || exporting || AS.saving) return;
+  AS.saving = true;
+  try {
+    await idbPut('state', 'current', buildAutosavePayload());
+    // 媒体文件：只写未存过的（file 体积大，避免每次重写）
+    for (const a of state.assets){
+      if (a.file && !a._savedToIdb){
+        await idbPut('media', a.id, a.file);
+        a._savedToIdb = true;
+      }
+    }
+    // 清理已删除素材的媒体记录
+    const keys = (await idbAllEntries('media')).map(e => e.key);
+    const live = new Set(state.assets.map(a => a.id));
+    for (const k of keys){ if (!live.has(k)) await idbDel('media', k); }
+    setSaveState('✓ 已自动保存 ' + fmtTime(new Date().getHours() * 3600 + new Date().getMinutes() * 60 + new Date().getSeconds()));
+  } catch(e){
+    setSaveState('⚠ 自动保存不可用');
+  }
+  AS.saving = false;
+}
+async function loadAutosave(){
+  try { return await idbGet('state', 'current'); }
+  catch(e){ return null; }
+}
+async function restoreAutosave(p){
+  if (!p || !p.tracks) return false;
+  setPlaying(false);
+  pauseAllMedia();
+  for (const el of elsByClip.values()){ try { if (el.pause) el.pause(); } catch(e){} }
+  elsByClip.clear();
+  const mediaRecs = await idbAllEntries('media');
+  state.assets = (p.assets || []).map(m => {
+    const rec = mediaRecs.find(r => r.key === m.id);
+    return {
+      id: m.id, type: m.type, name: m.name, duration: m.duration,
+      width: m.width || 0, height: m.height || 0,
+      url: rec ? URL.createObjectURL(rec.val) : null,
+      file: rec ? rec.val : null, thumb: null, filmstrip: null, peaks: null,
+      _savedToIdb: !!rec
+    };
+  });
+  state.tracks = { video: [], text: [], audio: [] };
+  for (const t of ['video','text','audio']) state.tracks[t] = p.tracks[t] || [];
+  state.trackCfg = p.trackCfg ? JSON.parse(JSON.stringify(p.trackCfg)) : state.trackCfg;
+  if (p.pxPerSec) state.pxPerSec = p.pxPerSec;
+  state.time = p.time || 0;
+  state.selection = null; state.multi = [];
+  $('#projName').value = p.name || '未命名项目';
+  history = []; future = [];
+  rebuildClipElements();
+  renderLibrary(); recalcDuration(); renderTimeline(); renderTrackHeads(); buildProps(); updateToolbar();
+  seek(state.time);
+  // 后台补齐缩略图 / 胶片条 / 波形
+  for (const a of state.assets){ if (a.url) restoreProbe(a); }
+  return true;
+}
+function restoreProbe(a){
+  if (a.type === 'image'){
+    const img = new Image();
+    img.onload = () => {
+      const tc = document.createElement('canvas');
+      tc.width = 148; tc.height = 84;
+      tc.getContext('2d').drawImage(img, 0, 0, 148, 84);
+      a.thumb = tc.toDataURL('image/jpeg', .7);
+      renderLibrary(); renderClips();
+    };
+    img.src = a.url;
+    return;
+  }
+  const el = document.createElement(a.type);
+  el.preload = 'auto';
+  el.onloadedmetadata = () => {
+    if (isFinite(el.duration) && el.duration > 0) a.duration = el.duration;
+    if (a.type === 'video'){
+      a.width = el.videoWidth; a.height = el.videoHeight;
+      generateFilmstrip(a, el);
+      if (a.file) generatePeaks(a, a.file);
+    } else {
+      generatePeaks(a, a.file);
+      renderLibrary();
+    }
+  };
+  el.src = a.url;
+}
+async function discardAutosave(){
+  try {
+    await idbClear('media');
+    await idbDel('state', 'current');
+  } catch(e){}
+}
+
 /* ---------- 素材导入 ---------- */
 function importFiles(files){
   const list = Array.from(files || []);
   if (!list.length) return Promise.resolve();
   return Promise.all(list.map(f => importOne(f)))
-    .then(() => { renderLibrary(); renderTimeline(); toast('导入完成：' + list.length + ' 个素材'); });
+    .then(() => { renderLibrary(); renderTimeline(); scheduleAutosave(); toast('导入完成：' + list.length + ' 个素材'); });
 }
 function importOne(file){
   return new Promise(resolve => {
@@ -482,7 +689,8 @@ function importOne(file){
     const url = URL.createObjectURL(file);
     const asset = {
       id: uid(), type, name: file.name.replace(/\.[^.]+$/, ''), url,
-      duration: type === 'image' ? Infinity : 0, width: 0, height: 0, thumb: null
+      duration: type === 'image' ? Infinity : 0, width: 0, height: 0, thumb: null,
+      file: file, filmstrip: null, peaks: null, _savedToIdb: false
     };
     if (type === 'image'){
       const img = new Image();
@@ -516,6 +724,10 @@ function importOne(file){
       if (type === 'video' && el.videoWidth){ asset.width = el.videoWidth; asset.height = el.videoHeight; }
       state.assets.push(asset);
       resolve();
+      // 后台生成胶片条 / 波形（不阻塞导入）
+      if (type === 'video') generateFilmstrip(asset, el);
+      if (type === 'audio') generatePeaks(asset, file);
+      if (type === 'video') generatePeaks(asset, file);
     };
     el.onloadedmetadata = () => {
       // Chrome 对 MediaRecorder 产出的 WebM 报 duration=Infinity：
@@ -550,6 +762,57 @@ function importOne(file){
     el.onerror = () => { toast('媒体加载失败：' + file.name); finish(); };
     el.src = url;
   });
+}
+/* 胶片条：视频素材均匀抽 6 帧 */
+function generateFilmstrip(asset, el){
+  if (asset.type !== 'video' || !isFinite(asset.duration) || asset.duration <= 0) return;
+  const N = 6;
+  const frames = [];
+  let i = 0;
+  const tc = document.createElement('canvas');
+  tc.width = 96; tc.height = 54;
+  const g = tc.getContext('2d');
+  const done = () => { asset.filmstrip = frames; renderLibrary(); renderClips(); };
+  const next = () => {
+    if (i >= N){ done(); return; }
+    try { el.currentTime = asset.duration * (i + 0.5) / N; }
+    catch(e){ done(); return; }
+    el.onseeked = () => {
+      try { g.drawImage(el, 0, 0, 96, 54); } catch(e){}
+      frames.push(tc.toDataURL('image/jpeg', .55));
+      i++;
+      next();
+    };
+  };
+  next();
+}
+/* 波形峰值：解码音频取 400 桶峰值 */
+function generatePeaks(asset, file){
+  if (!file || !(asset.type === 'audio' || asset.type === 'video')) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  file.arrayBuffer().then(ab => {
+    const ac = new AC();
+    ac.decodeAudioData(ab).then(buf => {
+      const N = 400;
+      const peaks = new Array(N).fill(0);
+      const ch0 = buf.getChannelData(0);
+      const ch1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
+      const step = Math.max(1, Math.floor(ch0.length / N));
+      for (let i = 0; i < N; i++){
+        let m = 0;
+        const s = i * step, e = Math.min(ch0.length, s + step);
+        for (let j = s; j < e; j += 16){
+          const v = Math.abs(ch1 ? (ch0[j] + ch1[j]) / 2 : ch0[j]);
+          if (v > m) m = v;
+        }
+        peaks[i] = m;
+      }
+      asset.peaks = peaks;
+      try { ac.close(); } catch(e){}
+      renderClips();
+    }).catch(() => { try { ac.close(); } catch(e){} });
+  }).catch(() => {});
 }
 function renderLibrary(){
   const list = $('#assetList');
@@ -639,6 +902,10 @@ function findFreeStart(clips, dur, desired){
   return s;
 }
 function removeClip(track, id){
+  removeClipRaw(track, id);
+  recalcDuration(); renderTimeline(); buildProps(); updateToolbar();
+}
+function removeClipRaw(track, id){
   const arr = state.tracks[track];
   const i = arr.findIndex(c => c.id === id);
   if (i < 0) return;
@@ -647,7 +914,7 @@ function removeClip(track, id){
   elsByClip.delete(id);
   arr.splice(i, 1);
   if (state.selection && state.selection.id === id) state.selection = null;
-  recalcDuration(); renderTimeline(); buildProps(); updateToolbar();
+  state.multi = state.multi.filter(x => x !== id);
 }
 function removeAsset(id){
   const i = state.assets.findIndex(a => a.id === id);
@@ -655,11 +922,90 @@ function removeAsset(id){
   const name = state.assets[i].name;
   URL.revokeObjectURL(state.assets[i].url);
   state.assets.splice(i, 1);
+  if (AS.enabled) idbDel('media', id).catch(() => {});
   for (const t of ['video','text','audio']){
-    [...state.tracks[t]].filter(c => c.assetId === id).forEach(c => removeClip(t, c.id));
+    [...state.tracks[t]].filter(c => c.assetId === id).forEach(c => removeClipRaw(t, c.id));
   }
-  renderLibrary(); recalcDuration(); renderTimeline();
+  renderLibrary(); recalcDuration(); renderTimeline(); scheduleAutosave();
   toast('已删除素材：' + name);
+}
+
+/* ---------- 选中（单选 + 多选） ---------- */
+function selectClip(track, id){
+  state.selection = { track, id };
+  state.multi = [];
+  renderClips(); buildProps(); updateToolbar();
+}
+function toggleSelection(track, id){
+  if (!state.selection || state.selection.track !== track){
+    selectClip(track, id); return;
+  }
+  if (state.selection.id === id){
+    const next = state.multi.shift();
+    if (next) { state.selection = { track, id: next }; }
+    else { state.selection = null; }
+  } else if (state.multi.includes(id)){
+    state.multi = state.multi.filter(x => x !== id);
+  } else {
+    state.multi.push(id);
+  }
+  renderClips(); buildProps(); updateToolbar();
+}
+/* 全部选中片段：[{c, t}]（主选中在前） */
+function allSelected(){
+  const out = [];
+  const push = (t, id) => {
+    if (out.some(o => o.c.id === id)) return;
+    const c = getClip(id);
+    if (c && state.tracks[t] && state.tracks[t].includes(c)) out.push({ c, t });
+  };
+  if (state.selection) push(state.selection.track, state.selection.id);
+  const t = state.selection ? state.selection.track : null;
+  state.multi.forEach(id => push(t, id));
+  return out;
+}
+function trackLocked(t){ return !!(state.trackCfg[t] && state.trackCfg[t].locked); }
+function trackHidden(t){ return !!(state.trackCfg[t] && state.trackCfg[t].hidden); }
+
+/* 波纹删除 / 普通删除（支持多选） */
+function deleteSelected(ripple){
+  let sel = allSelected();
+  if (!sel.length){ toast('请先选中片段'); return; }
+  sel = sel.filter(s => !trackLocked(s.t));
+  if (!sel.length){ toast('选中片段在锁定轨道上'); return; }
+  pushHistory();
+  if (ripple){
+    sel.slice().sort((a, b) => b.c.start - a.c.start).forEach(({ c, t }) => {
+      const arr = state.tracks[t];
+      const start = c.start, dur = c.dur;
+      removeClipRaw(t, c.id);
+      arr.forEach(o => { if (o.start >= start - 1e-6) o.start = Math.max(0, o.start - dur); });
+    });
+    toast('已波纹删除并缝合空隙');
+  } else {
+    sel.forEach(({ c, t }) => removeClipRaw(t, c.id));
+    toast('已删除 ' + sel.length + ' 个片段');
+  }
+  state.selection = null; state.multi = [];
+  recalcDuration(); renderTimeline(); buildProps(); updateToolbar();
+}
+/* Ctrl+D 复制片段（多选时全部复制，放在原片段之后） */
+function duplicateSelected(){
+  let sel = allSelected();
+  if (!sel.length){ toast('请先选中片段'); return; }
+  sel = sel.filter(s => !trackLocked(s.t));
+  if (!sel.length){ toast('选中片段在锁定轨道上'); return; }
+  pushHistory();
+  sel.forEach(({ c, t }) => {
+    const copy = JSON.parse(JSON.stringify(c, (k, v) => k === 'el' ? undefined : v));
+    copy.id = uid();
+    copy.start = findFreeStart(state.tracks[t], c.dur, clipEnd(c));
+    state.tracks[t].push(copy);
+    if (copy.type !== 'text') createClipElement(copy);
+  });
+  for (const t of ['video','text','audio']) state.tracks[t].sort((a, b) => a.start - b.start);
+  recalcDuration(); renderTimeline();
+  toast('已复制 ' + sel.length + ' 个片段');
 }
 
 /* 分割：把选中片段在时间 t 处一分为二 */
@@ -681,6 +1027,7 @@ function splitClip(c, t){
 function splitSelected(){
   const c = getSel();
   if (!c){ toast('请先选中要分割的片段'); return; }
+  if (state.selection && trackLocked(state.selection.track)){ toast('该轨道已锁定'); return; }
   const r = splitClip(c, state.time);
   if (r){ pushHistory(); toast('已分割'); }
   else toast('播放头不在选中片段范围内');
@@ -771,26 +1118,111 @@ function renderClips(){
   for (const t of ['video','text','audio']){
     const lane = $('#lane-' + t);
     lane.innerHTML = '';
+    lane.classList.toggle('lane-hidden', trackHidden(t));
+    lane.classList.toggle('lane-locked', trackLocked(t));
     for (const c of state.tracks[t]){
       lane.appendChild(buildClipDom(c, t));
     }
   }
+  decorateClips();
+}
+/* 胶片条 / 波形需要按片段实际像素宽绘制，插入 DOM 后补画 */
+function decorateClips(){
+  $$('#tlContent .clip').forEach(el => {
+    const c = getClip(el.dataset.id);
+    if (!c) return;
+    const w = el.getBoundingClientRect().width;
+    const fs = el.querySelector('.filmstrip-c');
+    if (fs && !fs.childNodes.length) fillFilmstrip(fs, c, w);
+    const wv = el.querySelector('.wave-c');
+    if (wv) drawWave(wv, c, w);
+  });
+}
+function fillFilmstrip(container, c, w){
+  const asset = assetOf(c);
+  if (!asset) return;
+  const slotW = 54;
+  const n = Math.max(1, Math.ceil(w / slotW));
+  const speed = c.speed || 1;
+  for (let s = 0; s < n; s++){
+    const img = document.createElement('img');
+    img.draggable = false;
+    let src = null;
+    if (c.type === 'image' && asset.thumb){
+      src = asset.thumb;
+    } else if (asset.filmstrip && asset.filmstrip.length){
+      const srcTime = (c.in || 0) + (s * slotW / state.pxPerSec) * speed;
+      const idx = clamp(Math.floor(srcTime / asset.duration * asset.filmstrip.length), 0, asset.filmstrip.length - 1);
+      src = asset.filmstrip[idx];
+    } else if (asset.thumb){
+      src = asset.thumb;
+    }
+    if (src) img.src = src;
+    container.appendChild(img);
+  }
+}
+function drawWave(canvasEl, c, w){
+  const asset = assetOf(c);
+  if (!asset || !asset.peaks || !asset.peaks.length) return;
+  const W = Math.max(10, Math.min(3000, Math.round(w)));
+  const H = 16;
+  canvasEl.width = W; canvasEl.height = H;
+  const g = canvasEl.getContext('2d');
+  g.clearRect(0, 0, W, H);
+  g.fillStyle = '#2E9270';
+  const speed = c.speed || 1;
+  const t0 = (c.in || 0) / asset.duration, t1 = Math.min(1, ((c.in || 0) + c.dur * speed) / asset.duration);
+  const N = asset.peaks.length;
+  for (let x = 0; x < W; x += 2){
+    const p = asset.peaks[clamp(Math.floor((t0 + (t1 - t0) * x / W) * N), 0, N - 1)];
+    const h = Math.max(1, p * H * 1.6);
+    g.fillRect(x, (H - h) / 2, 1.4, h);
+  }
+}
+function renderTrackHeads(){
+  for (const t of ['video','text','audio']){
+    const head = document.querySelector('.tl-head.h-' + t);
+    if (!head) continue;
+    const cfg = state.trackCfg[t];
+    head.classList.toggle('head-hidden', cfg.hidden);
+    head.classList.toggle('head-locked', cfg.locked);
+    head.innerHTML =
+      '<div class="th-btns">' +
+        '<button class="th-btn' + (cfg.hidden ? ' on' : '') + '" data-t="' + t + '" data-act="hide" title="' + (cfg.hidden ? '取消隐藏' : '隐藏轨道（预览/导出跳过）') + '">' + (cfg.hidden ? '🚫' : '👁') + '</button>' +
+        '<button class="th-btn' + (cfg.locked ? ' on' : '') + '" data-t="' + t + '" data-act="lock" title="' + (cfg.locked ? '解除锁定' : '锁定轨道（防误编辑）') + '">' + (cfg.locked ? '🔒' : '🔓') + '</button>' +
+      '</div>' +
+      '<span class="head-title">' + (t === 'video' ? '视频' : t === 'text' ? '文字' : '音频') + '</span>' +
+      '<span class="sub">' + (t === 'video' ? '视频 / 图片' : t === 'text' ? '标题 / 字幕' : '音乐 / 音效') + '</span>';
+  }
+}
+function toggleTrack(t, act){
+  const cfg = state.trackCfg[t];
+  if (act === 'lock') cfg.locked = !cfg.locked;
+  if (act === 'hidden') cfg.hidden = !cfg.hidden;
+  renderTrackHeads(); renderClips(); scheduleAutosave();
+  toast((act === 'lock' ? (cfg.locked ? '已锁定' : '已解锁') : (cfg.hidden ? '已隐藏' : '已显示')) +
+    (t === 'video' ? '视频轨' : t === 'text' ? '文字轨' : '音频轨'));
+}
+function isClipSelected(c){
+  return (state.selection && state.selection.id === c.id) || state.multi.includes(c.id);
 }
 function buildClipDom(c, track){
   const asset = assetOf(c);
   const el = document.createElement('div');
-  el.className = 'clip c-' + c.type + (state.selection && state.selection.id === c.id ? ' selected' : '');
+  el.className = 'clip c-' + c.type + (isClipSelected(c) ? ' selected' : '');
   el.dataset.id = c.id;
   el.style.left = (c.start * state.pxPerSec) + 'px';
-  el.style.width = Math.max(6, c.dur * state.pxPerSec) + 'px';
+  const w = Math.max(6, c.dur * state.pxPerSec);
+  el.style.width = w + 'px';
   let bg = '', sub = '';
   if (c.type === 'text'){
     bg = '<div class="clip-label" style="left:8px;top:12px;">「' + esc(c.text.slice(0, 14) || '文字') + '」</div>';
     sub = fmtTime(c.dur);
   } else if (asset){
-    const thumb = asset.thumb ? '<img src="' + asset.thumb + '" draggable="false" alt="">' : '';
     bg = '<div class="clip-color" style="background:var(--' +
-      (c.type === 'video' ? 'video' : c.type === 'image' ? 'text' : 'audio') + '-c)"></div>' + thumb;
+      (c.type === 'video' ? 'video' : c.type === 'image' ? 'text' : 'audio') + '-c)"></div>' +
+      '<div class="filmstrip-c"></div>';
+    if (c.type === 'audio') bg += '<canvas class="wave-c"></canvas>';
     sub = (c.speed && c.speed !== 1 ? c.speed + 'x · ' : '') +
           (c.muted && c.type !== 'image' ? '🔇 ' : '') + fmtTime(c.dur);
   } else {
@@ -805,7 +1237,7 @@ function buildClipDom(c, track){
 }
 
 /* ---------- 时间轴交互 ---------- */
-let drag = null;   // {mode:'move'|'trimL'|'trimR', clip, track, orig, startX, moved}
+let drag = null;   // {mode, clip, track, orig, startX, moved, group:[{c,start}]}
 
 tlContent.addEventListener('mousedown', e => {
   if (exporting) return;
@@ -815,7 +1247,14 @@ tlContent.addEventListener('mousedown', e => {
     const track = ['video','text','audio'].find(t => state.tracks[t].some(c => c.id === id));
     const clip = getClip(id);
     if (!track || !clip) return;
-    selectClip(track, id);
+    if (trackLocked(track)){ scrubTo(e); drag = { mode: 'scrub' }; return; }  // 锁定轨：只允许拖播放头
+    const alreadySel = isClipSelected(clip);
+    if (e.shiftKey) toggleSelection(track, id);
+    else if (!alreadySel) selectClip(track, id);
+    else if (state.selection && state.selection.id !== id && state.multi.includes(id)){
+      state.selection = { track, id };   // 提升为主选中
+      renderClips(); buildProps(); updateToolbar();
+    }
     const rect = clipEl.getBoundingClientRect();
     const isL = e.target.classList.contains('handle') && e.target.classList.contains('l');
     const isR = e.target.classList.contains('handle') && e.target.classList.contains('r');
@@ -823,8 +1262,13 @@ tlContent.addEventListener('mousedown', e => {
       mode: isL ? 'trimL' : isR ? 'trimR' : 'move',
       clip, track,
       orig: { start: clip.start, dur: clip.dur, in: clip.in || 0 },
-      startX: e.clientX, moved: false
+      startX: e.clientX, moved: false,
+      group: null
     };
+    if (drag.mode === 'move' && isClipSelected(clip)){
+      drag.group = allSelected().map(({ c }) => ({ c, start: c.start }));
+      if (!drag.group.some(g => g.c.id === clip.id)) drag.group = [{ c: clip, start: clip.start }];
+    }
     if (isL || isR){
       document.body.classList.add('trimming');
       clipEl.classList.add('trimming');
@@ -835,7 +1279,7 @@ tlContent.addEventListener('mousedown', e => {
   } else {
     // 点空白 / 标尺 → 取消选中 + 跳转时间
     if (!e.target.closest('.clip')){
-      state.selection = null;
+      state.selection = null; state.multi = [];
       buildProps(); updateToolbar(); renderClips();
     }
     scrubTo(e);
@@ -850,11 +1294,23 @@ window.addEventListener('mousemove', e => {
   const c = drag.clip, o = drag.orig;
   if (drag.mode === 'move'){
     let ns = Math.max(0, o.start + dt);
-    ns = applySnap(ns, c, o);
+    ns = applySnap(ns, c, o, drag.group);
     if (drag.track === 'video'){
-      ns = clampToNeighbors(state.tracks.video, c.id, ns, c.dur);
+      ns = clampToNeighbors(state.tracks.video, c.id, ns, c.dur,
+        drag.group ? drag.group.map(g => g.c.id) : null);
     }
-    c.start = Math.max(0, ns);
+    const delta = ns - o.start;
+    if (drag.group && drag.group.length > 1){
+      drag.group.forEach(g => { g.c.start = Math.max(0, g.start + delta); });
+      if (drag.track === 'video'){
+        drag.group.slice().sort((a, b) => a.start - b.start).reduce((prevEnd, g) => {
+          if (g.c.start < prevEnd) g.c.start = prevEnd;
+          return g.c.start + g.c.dur;
+        }, 0);
+      }
+    } else {
+      c.start = Math.max(0, ns);
+    }
   } else if (drag.mode === 'trimL'){
     if (c.type === 'text' || c.type === 'image'){
       const maxShift = o.dur - MIN_DUR;
@@ -862,12 +1318,8 @@ window.addEventListener('mousemove', e => {
       c.start = o.start + shift;
       c.dur = o.dur - shift;
     } else {
-      const asset = assetOf(c);
       const speed = c.speed || 1;
-      let shift = clamp(dt, -o.in / speed, o.dur - MIN_DUR);
-      if (asset && isFinite(asset.duration)){
-        shift = Math.min(shift, 0); // in 不能 <0 已由上面限制
-      }
+      const shift = clamp(dt, -o.in / speed, o.dur - MIN_DUR);
       c.start = o.start + shift;
       c.dur = o.dur - shift;
       c.in = o.in + shift * speed;
@@ -900,8 +1352,9 @@ window.addEventListener('mouseup', () => {
   }
   drag = null;
 });
-function clampToNeighbors(clips, selfId, start, dur){
-  const others = clips.filter(c => c.id !== selfId).sort((a, b) => a.start - b.start);
+function clampToNeighbors(clips, selfId, start, dur, excludeIds){
+  const excl = new Set(excludeIds || [selfId]);
+  const others = clips.filter(c => !excl.has(c.id)).sort((a, b) => a.start - b.start);
   let lo = 0, hi = Infinity;
   for (const c of others){
     if (clipEnd(c) <= start + 0.001) lo = Math.max(lo, clipEnd(c));
@@ -909,21 +1362,22 @@ function clampToNeighbors(clips, selfId, start, dur){
   }
   return clamp(start, lo, hi === Infinity ? start : Math.max(lo, hi - dur));
 }
-function snapCandidates(c){
+function snapCandidates(c, group){
   const pts = [0, state.time];
+  const excl = new Set(group ? group.map(g => g.c.id) : [c.id]);
   for (const t of ['video','text','audio']){
     for (const o of state.tracks[t]){
-      if (o.id === c.id) continue;
+      if (excl.has(o.id)) continue;
       pts.push(o.start, clipEnd(o));
     }
   }
   return pts;
 }
-function applySnap(ns, c, o){
+function applySnap(ns, c, o, group){
   if (!state.snap) return ns;
   const thr = 8 / state.pxPerSec;
   const ends = [ns, ns + c.dur];
-  for (const p of snapCandidates(c)){
+  for (const p of snapCandidates(c, group)){
     for (let i = 0; i < 2; i++){
       if (Math.abs(ends[i] - p) < thr){
         ns += p - ends[i];
@@ -1176,30 +1630,39 @@ function seek(t){
 }
 /* 同步各片段媒体元素到当前时间 */
 function syncMedia(){
-  for (const c of allClips()){
-    if (c.type === 'text' || c.type === 'image') continue;
-    const el = mediaEl(c);
-    if (!el) continue;
-    const active = state.time >= c.start - 0.02 && state.time < clipEnd(c);
-    if (active){
-      const speed = c.speed || 1;
-      const target = (c.in || 0) + (state.time - c.start) * speed;
-      if (state.playing){
-        if (Math.abs(el.currentTime - target) > 0.25){
-          try { el.currentTime = target; } catch(e){}
+  for (const t of ['video','audio']){
+    if (trackHidden(t)){
+      for (const c of state.tracks[t]){
+        const el = mediaEl(c);
+        if (el && !el.paused){ try { el.pause(); } catch(e){} }
+      }
+      continue;
+    }
+    for (const c of state.tracks[t]){
+      if (c.type === 'image') continue;   // 图片片段无媒体时钟
+      const el = mediaEl(c);
+      if (!el) continue;
+      const active = state.time >= c.start - 0.02 && state.time < clipEnd(c);
+      if (active){
+        const speed = c.speed || 1;
+        const target = (c.in || 0) + (state.time - c.start) * speed;
+        if (state.playing){
+          if (Math.abs(el.currentTime - target) > 0.25){
+            try { el.currentTime = target; } catch(e){}
+          }
+          try { el.playbackRate = speed; } catch(e){}
+          el.volume = clamp(c.volume, 0, 1);
+          el.muted = !!c.muted;
+          if (el.paused){ el.play().catch(() => {}); }
+        } else {
+          if (!el.paused) el.pause();
+          if (Math.abs(el.currentTime - target) > 0.08){
+            try { el.currentTime = target; } catch(e){}
+          }
         }
-        try { el.playbackRate = speed; } catch(e){}
-        el.volume = clamp(c.volume, 0, 1);
-        el.muted = !!c.muted;
-        if (el.paused){ el.play().catch(() => {}); }
       } else {
         if (!el.paused) el.pause();
-        if (Math.abs(el.currentTime - target) > 0.08){
-          try { el.currentTime = target; } catch(e){}
-        }
       }
-    } else {
-      if (!el.paused) el.pause();
     }
   }
 }
@@ -1221,8 +1684,9 @@ function drawFrame(){
   ctx.fillRect(0, 0, CW, CH);
   let hasPicture = false;
 
-  // 视频轨（单轨顺序播放，同刻只可能有一个激活）
+  // 视频轨（单轨顺序播放，同刻只可能有一个激活；隐藏轨跳过）
   for (const c of state.tracks.video){
+    if (trackHidden('video')) break;
     if (state.time < c.start || state.time >= clipEnd(c)) continue;
     const el = mediaEl(c);
     hasPicture = true;
@@ -1243,6 +1707,7 @@ function drawFrame(){
   // 图片轨之外：时间轴上若无视频片段但有图片 → 已含在 video 轨
   // 文字
   for (const c of state.tracks.text){
+    if (trackHidden('text')) break;
     if (state.time < c.start || state.time >= clipEnd(c)) continue;
     if (!c.text) continue;
     hasPicture = true;
@@ -1600,9 +2065,13 @@ function rebuildClipElements(){
 function updateToolbar(){
   $('#btnUndo').disabled = !history.length;
   $('#btnRedo').disabled = !future.length;
+  const sel = allSelected();
   const c = getSel();
+  const anySel = sel.length > 0;
   $('#btnSplit').disabled = !c;
-  $('#btnDeleteClip').disabled = !c;
+  $('#btnDeleteClip').disabled = !anySel;
+  $('#btnRipple').disabled = !anySel;
+  $('#btnDup').disabled = !anySel;
 }
 $('#btnImport').addEventListener('click', () => $('#fileInput').click());
 $('#btnImport2').addEventListener('click', () => $('#fileInput').click());
@@ -1623,13 +2092,9 @@ $('#btnPlay').addEventListener('click', togglePlay);
 $('#btnToStart').addEventListener('click', () => seek(0));
 $('#btnToEnd').addEventListener('click', () => seek(state.duration));
 $('#btnSplit').addEventListener('click', splitSelected);
-$('#btnDeleteClip').addEventListener('click', () => {
-  const c = getSel();
-  if (!c) return;
-  pushHistory();
-  removeClip(state.selection.track, c.id);
-  toast('已删除片段');
-});
+$('#btnDeleteClip').addEventListener('click', () => deleteSelected(false));
+$('#btnRipple').addEventListener('click', () => deleteSelected(true));
+$('#btnDup').addEventListener('click', duplicateSelected);
 $('#btnAddText').addEventListener('click', () => { pushHistory(); addTextClip(); });
 $('#btnSplitAll').addEventListener('click', splitAllAtPlayhead);
 
@@ -1640,17 +2105,14 @@ window.addEventListener('keydown', e => {
   if (e.ctrlKey || e.metaKey){
     if (e.key === 'z' || e.key === 'Z'){ e.preventDefault(); e.shiftKey ? redo() : undo(); }
     else if (e.key === 'y' || e.key === 'Y'){ e.preventDefault(); redo(); }
+    else if (e.key === 'd' || e.key === 'D'){ e.preventDefault(); duplicateSelected(); }
     return;
   }
   switch (e.key){
     case ' ': e.preventDefault(); togglePlay(); break;
     case 's': case 'S': splitSelected(); break;
     case 't': case 'T': pushHistory(); addTextClip(); break;
-    case 'Delete': case 'Backspace': {
-      const c = getSel();
-      if (c){ pushHistory(); removeClip(state.selection.track, c.id); toast('已删除片段'); }
-      break;
-    }
+    case 'Delete': case 'Backspace': deleteSelected(e.shiftKey); break;
     case 'Home': seek(0); break;
     case 'End': seek(state.duration); break;
     case 'ArrowLeft': seek(state.time - (e.shiftKey ? 1 : 0.1)); break;
@@ -1659,15 +2121,47 @@ window.addEventListener('keydown', e => {
 });
 
 /* ---------- 启动 ---------- */
+function openRestoreModal(payload){
+  $('#modalRoot').innerHTML =
+    '<div class="modal-mask"><div class="modal"><h3>🕐 检测到上次未完成的剪辑</h3>' +
+    '<div class="m-body">自动保存于 ' + new Date(payload.savedAt).toLocaleTimeString() + '，包含 ' +
+    (payload.assets ? payload.assets.length : 0) + ' 个素材。是否恢复继续编辑？</div>' +
+    '<div class="m-btns"><button id="btnRestoreNo">丢弃</button><button id="btnRestoreYes" class="primary">恢复继续编辑</button></div>' +
+    '</div></div>';
+  $('#btnRestoreNo').addEventListener('click', () => { discardAutosave(); closeModal(); });
+  $('#btnRestoreYes').addEventListener('click', () => {
+    restoreAutosave(payload).then(ok => {
+      closeModal();
+      toast(ok ? '已恢复上次剪辑进度' : '恢复失败');
+    });
+  });
+}
 function init(){
   renderLibrary();
   recalcDuration();
   renderClips();
+  renderTrackHeads();
   buildProps();
   updateToolbar();
   drawRuler();
   document.body.setAttribute('data-init-ok', '1');
   requestAnimationFrame(ts => { lastTs = ts; requestAnimationFrame(tick); });
+  // 项目名变更 → 自动保存
+  $('#projName').addEventListener('change', scheduleAutosave);
+  // 轨道头 锁定/隐藏 按钮（事件委托，renderTrackHeads 重绘不影响）
+  $('#tlHeads').addEventListener('click', e => {
+    const btn = e.target.closest('.th-btn');
+    if (btn) toggleTrack(btn.dataset.t, btn.dataset.act);
+  });
+  // 页面卸载前尽力保存一次
+  window.addEventListener('beforeunload', () => { if (AS.enabled) performAutosave(); });
+  // 启动时检查自动存档
+  loadAutosave().then(p => {
+    const has = p && ((p.tracks && ['video','text','audio'].some(t => p.tracks[t] && p.tracks[t].length)) ||
+                      (p.assets && p.assets.length));
+    if (has) openRestoreModal(p);
+    else setSaveState('自动保存就绪');
+  });
 }
 init();
 
@@ -1678,6 +2172,9 @@ window.__ov = {
   removeClip, seek, setPlaying, togglePlay, drawFrame, pushHistory, undo, redo,
   setClipSpeed, findFreeStart, getSel, clampToNeighbors,
   recalcDuration, renderTimeline, renderClips,
+  toggleSelection, allSelected, deleteSelected, duplicateSelected,
+  toggleTrack, renderTrackHeads,
+  performAutosave, loadAutosave, restoreAutosave, discardAutosave, buildAutosavePayload,
   cv, ctx,
   snapTo: t => { state.time = t; $('#playhead').style.left = (t * state.pxPerSec) + 'px'; }
 };
